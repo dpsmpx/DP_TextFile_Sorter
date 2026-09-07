@@ -237,7 +237,9 @@ def test_move_without_permission_is_refused(vault: Path) -> None:
 def test_config_file_is_applied(make_vault) -> None:
     root = make_vault({"a.md": "# Termux\n\npkg install\n"}, ("Linux/Termux",))
     (root / "md_sorter.toml").write_text(
-        "[md_sorter]\nthreshold = 0.99\nuncertain_strategy = \"root\"\n", encoding="utf-8"
+        "[md_sorter]\nthreshold = 0.99\nmin_evidence = 1.0\n"
+        'uncertain_strategy = "root"\n',
+        encoding="utf-8",
     )
     assert main(["--root", str(root), "--no-color"]) == EXIT_OK
     assert (root / SORTED_DIR_NAME / "a.md").is_file()
@@ -268,3 +270,61 @@ def test_aliases_from_config_steer_classification(make_vault) -> None:
     )
     assert main(["--root", str(root), "--no-color"]) == EXIT_OK
     assert (root / SORTED_DIR_NAME / "Hobby" / "Moto" / "мотоцикл.md").is_file()
+
+
+# --- Новое правило приёма и режимы, добавленные для повышения полноты ---------
+
+
+def test_uncertain_strategy_best_places_everything(vault: Path) -> None:
+    """Режим «раскладывать всё»: в _NEEDS_REVIEW попадают только заметки без сигнала."""
+    run(vault, "--uncertain-strategy", "best")
+    review = vault / SORTED_DIR_NAME / REVIEW_DIR_NAME
+    placed = list((vault / SORTED_DIR_NAME).rglob("*.md"))
+    in_review = list(review.rglob("*.md")) if review.exists() else []
+    assert len(placed) > len(in_review) * 3
+
+
+def test_dominance_rule_accepts_low_absolute_score(make_vault) -> None:
+    """Личная категория, которой нет во встроенном словаре, всё равно узнаётся."""
+    root = make_vault(
+        {
+            "Хобби/Мотоциклы/масло.md": "# Масло\n\nЗамена масла, фильтр, уровень.\n",
+            "Хобби/Мотоциклы/цепь.md": "# Цепь\n\nСмазка цепи, натяжение, звёзды.\n",
+            "Хобби/Мотоциклы/колодки.md": "# Колодки\n\nТормозные колодки, прокачка, диск.\n",
+            "Хобби/Аквариум/вода.md": "# Вода\n\nПодмена воды, сифонка грунта, нитраты.\n",
+            "Хобби/Аквариум/фильтр.md": "# Фильтр\n\nВнешний фильтр, промывка губки.\n",
+            "новая заметка.md": "# Обслуживание\n\nПроверил натяжение цепи и уровень масла.\n",
+        },
+        ("Хобби/Мотоциклы", "Хобби/Аквариум"),
+    )
+    assert run(root) == EXIT_OK
+    assert (root / SORTED_DIR_NAME / "Хобби" / "Мотоциклы" / "новая заметка.md").is_file()
+
+
+def test_strict_settings_still_send_notes_to_review(vault: Path) -> None:
+    """Оба основания для приёма отключаются, поведение остаётся предсказуемым."""
+    run(vault, "--threshold", "0.99", "--min-evidence", "1.0", "--self-training-rounds", "0")
+    review = vault / SORTED_DIR_NAME / REVIEW_DIR_NAME
+    assert review.is_dir()
+    assert len(list(review.glob("*.md"))) >= 5
+
+
+def test_evaluate_mode_reports_and_changes_nothing(vault: Path) -> None:
+    """Самопроверка ничего не создаёт и печатает измеримые метрики."""
+    before = tree_digest(vault)
+    assert main(["--root", str(vault), "--no-color", "--no-config", "--evaluate"]) == EXIT_OK
+    assert tree_digest(vault) == before
+
+
+def test_evaluate_output_contains_metrics(vault: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    main(["--root", str(vault), "--no-color", "--no-config", "--evaluate"])
+    output = capsys.readouterr().out
+    assert "Заметок с известной категорией" in output
+    assert "Лучший кандидат совпал с вашим выбором" in output
+    assert "Принято решений (полнота)" in output
+
+
+def test_evaluate_without_filed_notes_is_fatal(make_vault) -> None:
+    """Без разложенных заметок измерять нечего — об этом надо сказать прямо."""
+    root = make_vault({"a.md": "# Termux\n\npkg install\n"}, ("Linux/Termux",))
+    assert main(["--root", str(root), "--no-color", "--no-config", "--evaluate"]) == EXIT_FATAL

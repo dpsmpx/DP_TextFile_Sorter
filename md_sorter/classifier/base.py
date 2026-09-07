@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 
 from ..config import Config
 from ..models import Candidate, Category, ParsedNote
@@ -42,6 +42,20 @@ class Classifier(ABC):
     @abstractmethod
     def rank(self, note: ParsedNote, note_index: int = -1) -> list[Candidate]:
         """Возвращает кандидатов, отсортированных по убыванию score."""
+
+    def learn_from(self, assignments: Mapping[int, str]) -> int:
+        """Добавляет уверенно классифицированные заметки в обучающий набор.
+
+        Позволяет второму проходу опереться на результаты первого. Реализация
+        по умолчанию ничего не делает и сообщает, что новых знаний нет.
+
+        Args:
+            assignments: отображение «индекс заметки -> ключ категории».
+
+        Returns:
+            Сколько заметок реально добавлено в обучающий набор.
+        """
+        return 0
 
     def close(self) -> None:
         """Освобождает ресурсы (кэши, соединения). По умолчанию — ничего."""

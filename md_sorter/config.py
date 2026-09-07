@@ -58,6 +58,11 @@ class ScoringWeights:
     category_alias: float = 3.0
     category_notes: float = 1.0
 
+    # --- дополнительные источники сигнала ---
+    # Голос ближайших уже разложенных заметок и ссылок [[wiki-link]] на них.
+    knn_influence: float = 1.0
+    link_influence: float = 0.6
+
     # --- правила ранжирования ---
     parent_support: float = 0.35
     depth_bonus: float = 0.06
@@ -78,9 +83,19 @@ class Config:
     log_file: Path | None = None
     color: bool | None = None
 
-    # Порог откалиброван по наблюдаемому разделению: уверенные решения
-    # набирают 0.25-0.99, отсутствие сигнала — 0.00-0.16.
+    # Абсолютный порог уверенности. Работает только для категорий с «толстым»
+    # профилем: много своих заметок или попадание во встроенный словарь.
     threshold: float = 0.22
+
+    # Относительное правило приёма. Величина косинуса зависит от размера профиля
+    # категории, поэтому у личных категорий пользователя абсолютные оценки
+    # всегда низкие. Если лидер оторвался от ближайшего несвязанного соперника
+    # хотя бы в `dominance` раз и набрал не меньше `min_evidence`, решение
+    # принимается независимо от абсолютной величины.
+    dominance: float = 1.5
+    min_evidence: float = 0.05
+
+    # Минимальный отрыв лидера от соперника; иначе решение считается спорным.
     margin: float = 0.06
     uncertain_strategy: str = "review"
     classifier: str = "lexical"
@@ -103,6 +118,24 @@ class Config:
     jobs: int = 1
     parallel_threshold: int = 500
     top_candidates: int = 3
+
+    # Сколько раз уверенные решения возвращаются в обучающий набор.
+    # Нужно для «холодного» хранилища, где ещё ничего не разложено:
+    # первый проход опознаёт очевидное, второй опирается на него.
+    self_training_rounds: int = 1
+
+    # Обучаться можно только на решениях не слабее этой оценки. Иначе
+    # заметка, принятая относительным правилом «за неимением лучшего»,
+    # станет примером категории и потянет за собой похожие ошибки.
+    self_training_min_score: float = 0.10
+
+    # Сколько ближайших уже разложенных заметок голосует за категорию.
+    knn_neighbors: int = 5
+
+    # Сколько заметок должно лежать в категории, чтобы её голос учитывался
+    # полностью. Категория с единственной заметкой иначе притягивала бы
+    # всё похожее на эту одну заметку.
+    knn_min_support: int = 3
 
     aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
     weights: ScoringWeights = field(default_factory=ScoringWeights)
@@ -207,10 +240,18 @@ def validate(config: Config) -> None:
         raise ConfigError("threshold должен быть в диапазоне 0..1")
     if not 0.0 <= config.margin <= 1.0:
         raise ConfigError("margin должен быть в диапазоне 0..1")
-    if config.uncertain_strategy not in {"review", "ancestor", "root", "skip"}:
+    if config.uncertain_strategy not in {"review", "ancestor", "root", "skip", "best"}:
         raise ConfigError(
-            "uncertain_strategy: допустимы review, ancestor, root, skip"
+            "uncertain_strategy: допустимы review, ancestor, root, skip, best"
         )
+    if config.dominance < 1.0:
+        raise ConfigError("dominance не может быть меньше 1.0")
+    if not 0.0 <= config.min_evidence <= 1.0:
+        raise ConfigError("min_evidence должен быть в диапазоне 0..1")
+    if not 0.0 <= config.self_training_min_score <= 1.0:
+        raise ConfigError("self_training_min_score должен быть в диапазоне 0..1")
+    if config.self_training_rounds < 0:
+        raise ConfigError("self_training_rounds не может быть отрицательным")
     if config.copy_mode not in {"copy", "move"}:
         raise ConfigError("copy_mode: допустимы copy или move")
     if config.copy_mode == "move" and not config.allow_move:
