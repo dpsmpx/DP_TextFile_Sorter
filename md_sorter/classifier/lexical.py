@@ -75,6 +75,7 @@ class LexicalClassifier(Classifier):
         self._note_category: dict[int, int] = {}
         self._link_targets: dict[str, int] = {}
         self._support: list[int] = []
+        self._vocabulary: frozenset[str] = frozenset()
 
     def fit(
         self,
@@ -148,7 +149,7 @@ class LexicalClassifier(Classifier):
     # ------------------------------------------------------------------
     def note_vector(self, note: ParsedNote) -> TokenBag:
         """IDF-взвешенный нормализованный вектор заметки (полный текст)."""
-        return to_vector(note.tokens, self._idf, self._default_idf)
+        return to_vector(note.tokens, self._idf, self._default_idf, self._vocabulary or None)
 
     def _base_scores(
         self,
@@ -166,7 +167,9 @@ class LexicalClassifier(Classifier):
         Подклассы (TF-IDF, embeddings, LLM) переопределяют только этот метод:
         правила иерархии и формирование объяснений остаются общими.
         """
-        strong_vector = to_vector(note.strong_tokens, self._idf, self._default_idf)
+        strong_vector = to_vector(
+            note.strong_tokens, self._idf, self._default_idf, self._vocabulary or None
+        )
         scores = self._similarities(note_vector)
         for index, value in enumerate(self._similarities(strong_vector)):
             if value > scores[index]:
@@ -219,11 +222,23 @@ class LexicalClassifier(Classifier):
         self._note_postings = {}
         self._note_category = {}
         self._support = [0] * len(self._categories)
+
+        # Словарь, который вообще что-то различает: токены категорий плюс
+        # токены разложенных заметок. Пересчитывается здесь, а не один раз в
+        # fit(), потому что самообучение добавляет новые обучающие заметки —
+        # с ними расширяется и словарь.
+        vocabulary = set(self._inverted)
+        for note_index in membership:
+            vocabulary.update(notes[note_index].tokens)
+        self._vocabulary = frozenset(vocabulary)
+
         if not membership:
             return
 
         for note_index, category_index in membership.items():
-            vector = to_vector(notes[note_index].tokens, self._idf, self._default_idf)
+            vector = to_vector(
+                notes[note_index].tokens, self._idf, self._default_idf, self._vocabulary or None
+            )
             if not vector:
                 continue
             self._note_category[note_index] = category_index
@@ -287,14 +302,24 @@ class LexicalClassifier(Classifier):
 
         query = heapq.nlargest(_QUERY_TERMS, note_vector.items(), key=lambda item: item[1])
         similarity: dict[int, float] = {}
+        shared: dict[int, int] = {}
         for token, value in query:
             for other_index, other_value in self._note_postings.get(token, ()):
                 if other_index == note_index:
                     continue  # заметка не может подтверждать сама себя
                 similarity[other_index] = similarity.get(other_index, 0.0) + value * other_value
+                shared[other_index] = shared.get(other_index, 0) + 1
 
         if not similarity:
             return empty
+
+        # Одно случайно совпавшее слово — не сходство тем. Голос соседа
+        # ослабляется, пока совпадений меньше knn_min_terms.
+        min_terms = max(1, self.config.knn_min_terms)
+        similarity = {
+            index: value * min(1.0, shared[index] / min_terms)
+            for index, value in similarity.items()
+        }
 
         neighbours = heapq.nlargest(
             max(1, self.config.knn_neighbors), similarity.items(), key=lambda item: item[1]

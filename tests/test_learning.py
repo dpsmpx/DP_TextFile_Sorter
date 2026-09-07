@@ -35,7 +35,7 @@ def make_note(name: str, text: str, source_dir: str = ".") -> ParsedNote:
 
 def classify(notes: list[ParsedNote], **overrides: object) -> dict[str, object]:
     """Классифицирует набор заметок и возвращает решения по именам файлов."""
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     for key, value in overrides.items():
         setattr(config, key, value)
 

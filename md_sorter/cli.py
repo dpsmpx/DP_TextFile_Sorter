@@ -8,12 +8,21 @@ import os
 import sys
 from collections.abc import Sequence
 from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from . import __version__
 from .classifier import available_classifiers, create_classifier
 from .classifier.base import Classifier
-from .config import Config, ConfigError, apply_config_data, find_config_file, load_config_file, validate
+from .config import (
+    Config,
+    ConfigError,
+    apply_config_data,
+    find_config_file,
+    load_config_file,
+    save_config,
+    validate,
+)
 from .decision import decide, resolve_destination
 from .file_manager import PlacementResult, load_manifest, place_note, save_manifest
 from .logging_setup import log_result, setup_logging
@@ -50,7 +59,20 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--version", action="version", version=f"md_sorter {__version__}")
-    parser.add_argument("--root", type=Path, default=None, help="каталог хранилища (по умолчанию — текущий)")
+    paths = parser.add_argument_group("пути")
+    paths.add_argument("--inbox", type=Path, default=None,
+                       help="каталог с несортированными заметками (по умолчанию — текущий)")
+    paths.add_argument("--vault", type=Path, default=None,
+                       help="корень хранилища, откуда берётся структура категорий "
+                            "(по умолчанию — сам inbox; для схемы «ХРАНИЛИЩЕ/INBOX» "
+                            "укажите ..)")
+    paths.add_argument("--output", type=Path, default=None,
+                       help="куда складывать результат (по умолчанию <inbox>/Sorted_md_files)")
+    paths.add_argument("--root", type=Path, default=None,
+                       help="устаревший синоним --inbox")
+    paths.add_argument("--save-config", nargs="?", const="", default=None, metavar="PATH",
+                       help="сохранить пути и настройки в файл и больше их не вводить "
+                            "(по умолчанию <inbox>/md_sorter.toml)")
     parser.add_argument("--dry-run", action="store_true", default=None,
                         help="только показать план, ничего не копировать")
     parser.add_argument("--evaluate", action="store_true",
@@ -115,23 +137,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve(path: Path) -> Path:
+    """Приводит путь к абсолютному виду, разворачивая ``~`` и ``..``."""
+    try:
+        return path.expanduser().resolve()
+    except OSError as exc:  # pragma: no cover - недоступный путь
+        raise ConfigError(f"Не удалось разобрать путь {path}: {exc}") from exc
+
+
 def build_config(args: argparse.Namespace) -> Config:
     """Собирает конфигурацию: значения по умолчанию, файл, аргументы CLI."""
-    root = (args.root or Path.cwd()).expanduser()
-    try:
-        root = root.resolve()
-    except OSError as exc:  # pragma: no cover - недоступный путь
-        raise ConfigError(f"Не удалось определить корневой каталог: {exc}") from exc
-
-    config = Config(root=root)
+    cli_inbox = args.inbox or args.root
+    config = Config(inbox=_resolve(cli_inbox or Path.cwd()))
 
     if not args.no_config:
-        config_path = args.config or find_config_file(root)
+        search_from = [config.inbox]
+        if args.vault is not None:
+            search_from.append(_resolve(args.vault))
+        config_path = args.config or find_config_file(*search_from)
         if config_path is not None:
             if not config_path.is_file():
                 raise ConfigError(f"Файл конфигурации не найден: {config_path}")
             apply_config_data(config, load_config_file(config_path))
-            config.root = root
+
+    # Пути из командной строки перекрывают сохранённые в файле.
+    if cli_inbox is not None:
+        config.inbox = cli_inbox
+    if args.vault is not None:
+        config.vault = args.vault
+    if args.output is not None:
+        config.output = args.output
+
+    config.inbox = _resolve(config.inbox)
+    config.vault = _resolve(config.vault) if config.vault is not None else None
+    config.output = _resolve(config.output) if config.output is not None else None
+    if config.vault == config.inbox:
+        config.vault = None  # раздельной схемы нет, работаем по-старому
 
     # Аргументы CLI имеют приоритет над файлом конфигурации; ``None`` означает
     # «параметр не задан», поэтому все флаги объявлены с ``default=None``.
@@ -235,22 +276,35 @@ def parse_notes(
 # ----------------------------------------------------------------------
 # Основной конвейер
 # ----------------------------------------------------------------------
-def _validate_root(config: Config) -> None:
-    """Проверяет пригодность корневого каталога."""
-    root = config.root
-    if not root.exists():
-        raise ConfigError(f"Каталог не существует: {root}")
-    if not root.is_dir():
-        raise ConfigError(f"Это не каталог: {root}")
-    if SORTED_DIR_NAME in root.parts:
+def _validate_directory(path: Path, label: str, *, writable: bool) -> None:
+    """Проверяет, что каталог пригоден для работы."""
+    if not path.exists():
+        raise ConfigError(f"{label} не существует: {path}")
+    if not path.is_dir():
+        raise ConfigError(f"{label} — это не каталог: {path}")
+    if SORTED_DIR_NAME in path.parts:
         raise ConfigError(
-            f"Запуск внутри {SORTED_DIR_NAME} запрещён: "
+            f"{label} находится внутри {SORTED_DIR_NAME}: "
             "это привело бы к повторной сортировке результата"
         )
-    if not os.access(root, os.R_OK):
-        raise ConfigError(f"Нет прав на чтение каталога: {root}")
-    if not config.dry_run and not os.access(root, os.W_OK):
-        raise ConfigError(f"Нет прав на запись в каталог: {root}")
+    if not os.access(path, os.R_OK):
+        raise ConfigError(f"Нет прав на чтение: {path}")
+    if writable and not os.access(path, os.W_OK):
+        raise ConfigError(f"Нет прав на запись: {path}")
+
+
+def _validate_paths(config: Config) -> None:
+    """Проверяет inbox и корень хранилища перед началом работы."""
+    _validate_directory(config.inbox, "Каталог inbox", writable=False)
+    if config.split_layout:
+        _validate_directory(config.vault_dir, "Корень хранилища", writable=False)
+    if not config.dry_run:
+        target_parent = config.sorted_dir.parent
+        _validate_directory(
+            target_parent if target_parent.exists() else config.inbox,
+            "Каталог для результата",
+            writable=True,
+        )
 
 
 def evaluate(config: Config, logger: logging.Logger) -> int:
@@ -260,34 +314,53 @@ def evaluate(config: Config, logger: logging.Logger) -> int:
     можно проверить, угадывает ли программа его собственный выбор, и подобрать
     параметры под конкретное хранилище, ничего при этом не копируя.
     """
-    _validate_root(config)
-    logger.info("Root: %s", config.root)
+    _validate_paths(config)
+    logger.info("Inbox: %s", config.inbox)
+    if config.split_layout:
+        logger.info("Хранилище: %s", config.vault_dir)
     logger.info("Проверка на уже разложенных заметках...")
 
-    scan = scan_tree(config, logger)
-    categories = build_categories(scan.directories)
-    if not scan.notes or not categories:
+    corpus = _collect(config, logger)
+    categories_by_key = {category.key: category for category in corpus.categories}
+    if not corpus.notes or not categories_by_key:
         logger.error("Недостаточно данных: нужны категории и разложенные по ним заметки")
         return EXIT_FATAL
 
-    parsed, _ = parse_notes(scan.notes, config, logger)
-    notes_by_category = build_category_profiles(categories, parsed, config)
-    categories_by_key = {category.key: category for category in categories}
+    notes_by_category = build_category_profiles(
+        corpus.categories, corpus.notes, config, filed_indices=corpus.filed_indices
+    )
+
+    # Проверяем на заметках, чью категорию выбрал сам пользователь.
+    known = [
+        (index, note)
+        for index, note in enumerate(corpus.notes)
+        if note.record.source_dir.as_posix() in categories_by_key
+        and (corpus.filed_indices is None or index in corpus.filed_indices)
+    ]
+    if not known:
+        logger.error(
+            "В категориях нет ни одной заметки — измерять не на чем. "
+            "Разложите вручную хотя бы по нескольку заметок в каждую папку."
+        )
+        return EXIT_FATAL
 
     classifier = create_classifier(config)
-    classifier.fit(parsed, categories, notes_by_category)
+    classifier.fit(corpus.notes, corpus.categories, notes_by_category)
     try:
-        verdicts = _decide_all(parsed, classifier, categories_by_key, config)
-        verdicts = _self_train(parsed, classifier, categories_by_key, config, logger, verdicts)
+        verdicts = {
+            index: decide(
+                note.record, classifier.rank(note, index), categories_by_key, config
+            )
+            for index, note in known
+        }
     finally:
         classifier.close()
 
     total = accepted = correct = top1 = 0
     misses: dict[str, int] = {}
-    for note, verdict in zip(parsed, verdicts):
+    for index, note in known:
         expected = note.record.source_dir.as_posix()
-        if expected not in categories_by_key:
-            continue  # заметка лежит в корне — правильного ответа нет
+        verdict = verdicts[index]
         total += 1
         if verdict.candidates and verdict.candidates[0].category == expected:
             top1 += 1
@@ -297,13 +370,6 @@ def evaluate(config: Config, logger: logging.Logger) -> int:
                 correct += 1
             else:
                 misses[expected] = misses.get(expected, 0) + 1
-
-    if total == 0:
-        logger.error(
-            "В категориях нет ни одной заметки — измерять не на чем. "
-            "Разложите вручную хотя бы по нескольку заметок в каждую папку."
-        )
-        return EXIT_FATAL
 
     log_result(logger, "Заметок с известной категорией: %d", total)
     log_result(logger, "Лучший кандидат совпал с вашим выбором: %.1f%%", 100.0 * top1 / total)
@@ -324,36 +390,123 @@ def evaluate(config: Config, logger: logging.Logger) -> int:
     return EXIT_OK
 
 
+@dataclass(slots=True)
+class Corpus:
+    """Разобранное содержимое хранилища и inbox.
+
+    Заметки хранилища — обучающий материал: они формируют профили категорий и
+    участвуют в голосовании соседей, но сами не сортируются и не копируются.
+    """
+
+    categories: list[Category]
+    directories: list[PurePosixPath]
+    notes: list[ParsedNote]
+    targets: slice
+    filed_indices: frozenset[int] | None
+    failures: list[tuple[NoteRecord, str]]
+    errors: int
+
+    @property
+    def target_notes(self) -> list[ParsedNote]:
+        """Заметки, которые нужно разложить."""
+        return self.notes[self.targets]
+
+    @property
+    def target_offset(self) -> int:
+        """Индекс первой сортируемой заметки в общем списке."""
+        return self.targets.start or 0
+
+
+def _collect(config: Config, logger: logging.Logger) -> Corpus:
+    """Обходит хранилище и inbox, разбирает найденные заметки."""
+    inbox_scan = scan_tree(
+        config.inbox,
+        config,
+        logger,
+        excluded_paths=[config.vault_dir] if _is_strictly_inside(config.vault_dir, config.inbox) else [],
+    )
+
+    if not config.split_layout:
+        parsed, failures = parse_notes(inbox_scan.notes, config, logger)
+        return Corpus(
+            categories=build_categories(inbox_scan.directories),
+            directories=inbox_scan.directories,
+            notes=parsed,
+            targets=slice(0, len(parsed)),
+            filed_indices=None,
+            failures=failures,
+            errors=inbox_scan.errors,
+        )
+
+    vault_scan = scan_tree(
+        config.vault_dir, config, logger, excluded_paths=[config.inbox]
+    )
+    logger.info(
+        "Структура категорий берётся из %s (заметок-образцов: %d)",
+        config.vault_dir,
+        len(vault_scan.notes),
+    )
+    training, training_failures = parse_notes(vault_scan.notes, config, logger)
+    targets, target_failures = parse_notes(inbox_scan.notes, config, logger)
+
+    return Corpus(
+        categories=build_categories(vault_scan.directories),
+        directories=vault_scan.directories,
+        notes=[*training, *targets],
+        targets=slice(len(training), len(training) + len(targets)),
+        filed_indices=frozenset(range(len(training))),
+        failures=[*training_failures, *target_failures],
+        errors=vault_scan.errors + inbox_scan.errors,
+    )
+
+
+def _is_strictly_inside(path: Path, parent: Path) -> bool:
+    """True, если ``path`` лежит внутри ``parent`` и не совпадает с ним."""
+    if path == parent:
+        return False
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
 def run(config: Config, logger: logging.Logger) -> int:
     """Выполняет полный цикл: обход, классификацию, размещение, отчёт."""
-    _validate_root(config)
+    _validate_paths(config)
     reporter = Reporter(config, logger)
-    reporter.announce_root(str(config.root))
+    reporter.announce_root(str(config.inbox))
 
     logger.info("Searching Markdown files...")
-    scan = scan_tree(config, logger)
+    corpus = _collect(config, logger)
 
     if not config.dry_run:
         ensure_sorted_dir(config, logger)
 
-    categories = build_categories(scan.directories)
-    reporter.announce_scan(len(scan.notes), len(categories))
+    categories = corpus.categories
+    reporter.announce_scan(len(corpus.target_notes), len(categories))
 
     # Копия структуры создаётся независимо от того, нашлись ли заметки:
     # это отдельный результат работы, а не побочный эффект классификации.
-    mapping = mirror_structure(scan.directories, config, logger)
+    mapping = mirror_structure(corpus.directories, config, logger)
 
-    if not scan.notes:
+    if not corpus.target_notes:
         logger.info("Markdown-файлы не найдены, работа завершена")
-        reporter.summary(scan.errors)
-        return EXIT_WITH_ERRORS if scan.errors else EXIT_OK
+        reporter.summary(corpus.errors)
+        return EXIT_WITH_ERRORS if corpus.errors else EXIT_OK
 
-    parsed, failures = parse_notes(scan.notes, config, logger)
-    notes_by_category = build_category_profiles(categories, parsed, config)
+    parsed = corpus.notes
+    failures = corpus.failures
+    notes_by_category = build_category_profiles(
+        categories, parsed, config, filed_indices=corpus.filed_indices
+    )
     categories_by_key = {category.key: category for category in categories}
 
     classifier = create_classifier(config)
     classifier.fit(parsed, categories, notes_by_category)
+
+    targets = corpus.target_notes
+    offset = corpus.target_offset
 
     manifest = load_manifest(config, logger) if config.manifest else {}
     new_manifest: dict[str, dict[str, object]] = {}
@@ -367,12 +520,14 @@ def run(config: Config, logger: logging.Logger) -> int:
         reporter.report_decision(decision)
         decisions.append(decision)
 
-    total = len(parsed)
+    total = len(targets)
     try:
-        verdicts = _decide_all(parsed, classifier, categories_by_key, config)
-        verdicts = _self_train(parsed, classifier, categories_by_key, config, logger, verdicts)
+        verdicts = _decide_all(targets, offset, classifier, categories_by_key, config)
+        verdicts = _self_train(
+            targets, offset, classifier, categories_by_key, config, logger, verdicts
+        )
         _place_all(
-            parsed=parsed,
+            parsed=targets,
             verdicts=verdicts,
             mapping=mapping,
             config=config,
@@ -392,26 +547,34 @@ def run(config: Config, logger: logging.Logger) -> int:
     elif config.manifest:
         save_manifest(config, new_manifest, logger, version=__version__)
 
-    stats = reporter.summary(scan.errors)
+    stats = reporter.summary(corpus.errors)
     return EXIT_WITH_ERRORS if stats.errors else EXIT_OK
 
 
 
 def _decide_all(
-    parsed: Sequence[ParsedNote],
+    targets: Sequence[ParsedNote],
+    offset: int,
     classifier: Classifier,
     categories_by_key: dict[str, Category],
     config: Config,
 ) -> list[Decision]:
-    """Классифицирует все заметки, ничего не копируя и не печатая."""
+    """Классифицирует заметки inbox, ничего не копируя и не печатая.
+
+    Args:
+        offset: индекс первой сортируемой заметки в общем корпусе. При
+            раздельной схеме перед ними идут заметки хранилища, и классификатор
+            адресует их по сквозному номеру.
+    """
     return [
-        decide(note.record, classifier.rank(note, index), categories_by_key, config)
-        for index, note in enumerate(parsed)
+        decide(note.record, classifier.rank(note, offset + index), categories_by_key, config)
+        for index, note in enumerate(targets)
     ]
 
 
 def _self_train(
-    parsed: Sequence[ParsedNote],
+    targets: Sequence[ParsedNote],
+    offset: int,
     classifier: Classifier,
     categories_by_key: dict[str, Category],
     config: Config,
@@ -428,7 +591,7 @@ def _self_train(
     """
     for round_number in range(1, max(0, config.self_training_rounds) + 1):
         seeds = {
-            index: verdict.category
+            offset + index: verdict.category
             for index, verdict in enumerate(verdicts)
             if verdict.status is Status.SORTED
             and verdict.category
@@ -444,7 +607,7 @@ def _self_train(
             round_number,
             added,
         )
-        verdicts = _decide_all(parsed, classifier, categories_by_key, config)
+        verdicts = _decide_all(targets, offset, classifier, categories_by_key, config)
     return verdicts
 
 
@@ -543,6 +706,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         log_file=config.log_file,
         color=config.color,
     )
+
+    if args.save_config is not None:
+        target = Path(args.save_config) if args.save_config else config.inbox / "md_sorter.toml"
+        try:
+            written = save_config(config, target.expanduser())
+        except OSError as exc:
+            logger.error("Не удалось сохранить настройки: %s", exc)
+            return EXIT_FATAL
+        log_result(logger, "Настройки сохранены: %s", written)
+        log_result(logger, "Дальше достаточно запускать: python sorter.py")
 
     try:
         if args.evaluate:

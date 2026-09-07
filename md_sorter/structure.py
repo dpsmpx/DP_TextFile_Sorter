@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import defaultdict
+from collections.abc import Container
 from pathlib import Path, PurePosixPath
 
 from .config import Config, ConfigError
@@ -92,11 +93,20 @@ def build_category_profiles(
     categories: list[Category],
     notes: list[ParsedNote],
     config: Config,
+    *,
+    filed_indices: Container[int] | None = None,
 ) -> dict[str, list[int]]:
     """Наполняет профили категорий токенами.
 
     Источники: имя каталога, полный путь, встроенный лексикон, пользовательские
     алиасы и заметки, которые уже лежат в этом каталоге.
+
+    Args:
+        filed_indices: индексы заметок, которые считаются уже разложенными.
+            При раздельной схеме («хранилище отдельно, inbox отдельно») это
+            только заметки хранилища: содержимое inbox ещё не разобрано, и
+            принимать его за образец категории нельзя. ``None`` — считать
+            разложенной любую заметку, лежащую в каталоге-категории.
 
     Returns:
         Отображение «ключ категории -> индексы заметок, лежащих в ней»; оно
@@ -105,6 +115,8 @@ def build_category_profiles(
     weights = config.weights
     notes_by_dir: dict[str, list[int]] = defaultdict(list)
     for index, note in enumerate(notes):
+        if filed_indices is not None and index not in filed_indices:
+            continue
         notes_by_dir[note.record.source_dir.as_posix()].append(index)
 
     for category in categories:

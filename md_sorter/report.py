@@ -28,8 +28,11 @@ class Reporter:
     # Этапы работы
     # ------------------------------------------------------------------
     def announce_root(self, root: str) -> None:
-        """Сообщает корневой каталог и режим запуска."""
+        """Сообщает используемые каталоги и режим запуска."""
         self.logger.info("Root: %s", root)
+        if self.config.split_layout:
+            self.logger.info("Хранилище (структура категорий): %s", self.config.vault_dir)
+        self.logger.info("Результат: %s", self.config.sorted_dir)
         if self.config.dry_run:
             self.logger.info("Режим предварительного просмотра: файлы не копируются")
 

@@ -106,7 +106,7 @@ def classify_corpus(
         extra: дополнительные заметки ``имя -> (текст, исходный каталог)``.
         overrides: переопределения параметров конфигурации.
     """
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     for key, value in overrides.items():
         setattr(config, key, value)
 
@@ -214,7 +214,7 @@ def test_strict_settings_make_everything_uncertain() -> None:
 def test_weak_leader_without_dominance_is_uncertain() -> None:
     """Слабый сигнал без отрыва от соперников остаётся сомнительным."""
     categories = build_categories([PurePosixPath(item) for item in DIRECTORIES])
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     record = build_note("x.md", "# x").record
     candidates = [
         Candidate(category="Linux/Arch", score=0.04),
@@ -227,7 +227,7 @@ def test_weak_leader_without_dominance_is_uncertain() -> None:
 def test_single_weak_candidate_is_accepted_when_alone() -> None:
     """Если конкурентов нет вовсе, слабого, но реального сигнала достаточно."""
     categories = build_categories([PurePosixPath(item) for item in DIRECTORIES])
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     record = build_note("x.md", "# x").record
     candidates = [Candidate(category="Linux/Arch", score=0.09)]
     decision = decide(record, candidates, {c.key: c for c in categories}, config)
@@ -237,7 +237,7 @@ def test_single_weak_candidate_is_accepted_when_alone() -> None:
 
 def test_ambiguous_siblings_fall_back_to_parent() -> None:
     categories = build_categories([PurePosixPath(item) for item in DIRECTORIES])
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     record = build_note("x.md", "# x").record
     candidates = [
         Candidate(category="Linux/Arch", score=0.60),
@@ -251,7 +251,7 @@ def test_ambiguous_siblings_fall_back_to_parent() -> None:
 
 def test_ambiguous_unrelated_categories_are_uncertain() -> None:
     categories = build_categories([PurePosixPath(item) for item in DIRECTORIES])
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     record = build_note("x.md", "# x").record
     candidates = [
         Candidate(category="Linux/Arch", score=0.60),
@@ -262,7 +262,7 @@ def test_ambiguous_unrelated_categories_are_uncertain() -> None:
 
 
 def test_no_categories_means_uncertain() -> None:
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     record = build_note("x.md", "# x").record
     decision = decide(record, [], {}, config)
     assert decision.status is Status.UNCERTAIN
@@ -270,7 +270,7 @@ def test_no_categories_means_uncertain() -> None:
 
 
 def test_uncertain_strategies_pick_expected_directory() -> None:
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     record = build_note("x.md", "# x").record
     decision = decide(record, [], {}, config)
     mapping = {"Linux": PurePosixPath("Linux")}
@@ -300,7 +300,7 @@ def test_explanation_is_available_for_verbose_mode() -> None:
 
 def test_registry_exposes_all_classifiers() -> None:
     assert "lexical" in available_classifiers()
-    assert isinstance(create_classifier(Config(root=Path("/tmp"))), LexicalClassifier)
+    assert isinstance(create_classifier(Config(inbox=Path("/tmp"))), LexicalClassifier)
 
 
 # --- Опциональные классификаторы --------------------------------------------
@@ -308,7 +308,7 @@ def test_registry_exposes_all_classifiers() -> None:
 
 def _corpus_for_optional() -> tuple[list[ParsedNote], list[object], dict[str, list[int]], Config]:
     """Готовит корпус и категории для проверки альтернативных алгоритмов."""
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     notes = [build_note(name, text) for name, text in CORPUS.items()]
     categories = build_categories([PurePosixPath(item) for item in DIRECTORIES])
     notes_by_category = build_category_profiles(categories, notes, config)
@@ -335,7 +335,7 @@ def test_tfidf_excludes_note_from_its_own_category() -> None:
     pytest.importorskip("sklearn")
     from md_sorter.classifier.tfidf import TfidfClassifier
 
-    config = Config(root=Path("/tmp"))
+    config = Config(inbox=Path("/tmp"))
     notes = [
         build_note("уникальная.md", "# Совершенно уникальный текст\n\nквазиморфный субстрат.\n", "Games"),
         build_note("termux.md", "# Termux\n\npkg install python\n"),

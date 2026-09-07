@@ -93,7 +93,7 @@ def test_subtract_bag_removes_exhausted_tokens() -> None:
 def test_cosine_of_identical_vectors_is_one() -> None:
     idf, default = compute_idf([["a", "b"], ["b", "c"]])
     vector = to_vector({"a": 1.0, "b": 2.0}, idf, default)
-    assert cosine(vector, vector) == 1.0
+    assert cosine(vector, vector) == pytest.approx(1.0)
 
 
 def test_cosine_of_disjoint_vectors_is_zero() -> None:

@@ -11,6 +11,12 @@ from .models import SORTED_DIR_NAME
 #: Имена файлов конфигурации, которые ищутся в ROOT (в порядке приоритета).
 CONFIG_FILENAMES: tuple[str, ...] = ("md_sorter.toml", ".md_sorter.toml")
 
+#: Пользовательская конфигурация, общая для всех хранилищ.
+USER_CONFIG_PATH = Path.home() / ".config" / "md_sorter" / "config.toml"
+
+#: Ключи, значение которых всегда трактуется как путь.
+_PATH_KEYS = frozenset({"inbox", "vault", "output", "log_file"})
+
 #: Каталоги, которые никогда не сканируются.
 DEFAULT_IGNORED_DIRECTORIES: tuple[str, ...] = (
     SORTED_DIR_NAME,
@@ -73,9 +79,31 @@ class ScoringWeights:
 
 @dataclass(slots=True)
 class Config:
-    """Полный набор параметров запуска."""
+    """Полный набор параметров запуска.
 
-    root: Path = field(default_factory=Path.cwd)
+    Три пути разделены намеренно. В типичном хранилище Obsidian структура
+    категорий лежит в корне, а несортированные заметки — в отдельной папке
+    внутри него::
+
+        MAIN_OBSIDIAN_PC/     <- vault: отсюда берётся система категорий
+        ├── INBOX/            <- inbox: что нужно разложить
+        ├── Programming/
+        ├── Games/
+        └── Linux/
+
+    Заметки, уже разложенные по категориям хранилища, служат обучающим
+    материалом, но сами не сортируются и не копируются.
+    """
+
+    #: Каталог с несортированными заметками (что раскладываем).
+    inbox: Path = field(default_factory=Path.cwd)
+
+    #: Корень хранилища, откуда берётся структура категорий.
+    #: ``None`` означает «тот же каталог, что и inbox».
+    vault: Path | None = None
+
+    #: Куда складывать результат. ``None`` — ``<inbox>/Sorted_md_files``.
+    output: Path | None = None
     dry_run: bool = False
     verbose: bool = False
     debug: bool = False
@@ -137,13 +165,28 @@ class Config:
     # всё похожее на эту одну заметку.
     knn_min_support: int = 3
 
+    # Сколько общих терминов должно быть у заметки с соседом, чтобы его
+    # голос учитывался полностью. Одно случайно совпавшее слово вроде
+    # «проверил» не должно перевешивать три точных термина по теме.
+    knn_min_terms: int = 2
+
     aliases: dict[str, tuple[str, ...]] = field(default_factory=dict)
     weights: ScoringWeights = field(default_factory=ScoringWeights)
 
     @property
+    def vault_dir(self) -> Path:
+        """Корень хранилища: явно заданный или совпадающий с inbox."""
+        return self.vault if self.vault is not None else self.inbox
+
+    @property
     def sorted_dir(self) -> Path:
         """Абсолютный путь к каталогу с результатом сортировки."""
-        return self.root / SORTED_DIR_NAME
+        return self.output if self.output is not None else self.inbox / SORTED_DIR_NAME
+
+    @property
+    def split_layout(self) -> bool:
+        """True, если структура категорий берётся не из самого inbox."""
+        return self.vault_dir != self.inbox
 
     def effective_copy_mode(self) -> str:
         """Фактический режим переноса с учётом защиты исходных файлов."""
@@ -156,12 +199,24 @@ class ConfigError(RuntimeError):
     """Ошибка чтения или валидации конфигурации."""
 
 
-def find_config_file(root: Path) -> Path | None:
-    """Ищет файл конфигурации в корневом каталоге."""
-    for name in CONFIG_FILENAMES:
-        candidate = root / name
-        if candidate.is_file():
-            return candidate
+def find_config_file(*directories: Path) -> Path | None:
+    """Ищет файл конфигурации в указанных каталогах, затем у пользователя.
+
+    Порядок важен: настройки конкретного хранилища должны перекрывать общие,
+    поэтому сначала просматривается inbox, затем корень хранилища и только
+    потом ``~/.config/md_sorter/config.toml``.
+    """
+    seen: set[Path] = set()
+    for directory in directories:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        for name in CONFIG_FILENAMES:
+            candidate = directory / name
+            if candidate.is_file():
+                return candidate
+    if USER_CONFIG_PATH.is_file():
+        return USER_CONFIG_PATH
     return None
 
 
@@ -221,7 +276,7 @@ def apply_config_data(config: Config, data: dict[str, object]) -> Config:
         current = getattr(config, key)
         if isinstance(current, tuple) and isinstance(value, list):
             setattr(config, key, tuple(value))
-        elif isinstance(current, Path) or key in {"root", "log_file"}:
+        elif isinstance(current, Path) or key in _PATH_KEYS:
             setattr(config, key, Path(str(value)).expanduser())
         elif isinstance(current, bool):
             setattr(config, key, bool(value))
@@ -259,9 +314,82 @@ def validate(config: Config) -> None:
             "Режим move требует явного флага --allow-move "
             "(по умолчанию исходные файлы неприкосновенны)"
         )
+    if config.output is not None and config.output == config.inbox:
+        raise ConfigError("Каталог результата не может совпадать с inbox")
     if config.max_file_size <= 0:
         raise ConfigError("max_file_size должен быть положительным")
     if config.max_analysis_chars <= 0:
         raise ConfigError("max_analysis_chars должен быть положительным")
     if config.jobs < 0:
         raise ConfigError("jobs не может быть отрицательным")
+
+
+def _toml_value(value: object) -> str:
+    """Сериализует значение в TOML (нужное подмножество типов)."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return repr(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    text = str(value).replace("\\", "\\\\").replace('"', '\\"')
+    return f'"{text}"'
+
+
+#: Параметры, которые не имеет смысла сохранять: это режимы одного запуска.
+#: Цвет к тому же определяется автоматически по типу вывода.
+_TRANSIENT_KEYS = frozenset({"dry_run", "color"})
+
+
+def save_config(config: Config, path: Path) -> Path:
+    """Сохраняет текущие настройки в TOML-файл.
+
+    Записываются пути и всё, что отличается от значений по умолчанию, — чтобы
+    файл оставался коротким и читаемым, а не копией всей структуры.
+
+    Returns:
+        Путь к записанному файлу.
+    """
+    defaults = Config()
+    lines = [
+        "# Создано автоматически: python sorter.py --save-config",
+        "# Файл читается при запуске, поэтому пути больше вводить не нужно.",
+        "",
+        "[md_sorter]",
+        f"inbox = {_toml_value(str(config.inbox))}",
+    ]
+    if config.vault is not None:
+        lines.append(f"vault = {_toml_value(str(config.vault))}")
+    if config.output is not None:
+        lines.append(f"output = {_toml_value(str(config.output))}")
+
+    for field_info in fields(Config):
+        name = field_info.name
+        if name in {"inbox", "vault", "output", "aliases", "weights"} or name in _TRANSIENT_KEYS:
+            continue
+        value = getattr(config, name)
+        if value == getattr(defaults, name):
+            continue
+        if isinstance(value, Path):
+            value = str(value)
+        lines.append(f"{name} = {_toml_value(value)}")
+
+    if config.aliases:
+        lines.extend(["", "[md_sorter.aliases]"])
+        for key, terms in sorted(config.aliases.items()):
+            lines.append(f"{_toml_value(key)} = {_toml_value(list(terms))}")
+
+    changed_weights = {
+        field_info.name: getattr(config.weights, field_info.name)
+        for field_info in fields(ScoringWeights)
+        if getattr(config.weights, field_info.name)
+        != getattr(defaults.weights, field_info.name)
+    }
+    if changed_weights:
+        lines.extend(["", "[md_sorter.weights]"])
+        for key, value in sorted(changed_weights.items()):
+            lines.append(f"{key} = {_toml_value(value)}")
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path

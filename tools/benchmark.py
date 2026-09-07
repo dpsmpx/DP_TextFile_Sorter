@@ -165,14 +165,14 @@ def build_vault(root: Path, generator: random.Random, *, filed_per_topic: int = 
 
 def evaluate(root: Path, truth: dict[str, str], **overrides: object) -> dict[str, float]:
     """Прогоняет классификацию и считает полноту и точность."""
-    config = Config(root=root)
+    config = Config(inbox=root)
     for key, value in overrides.items():
         setattr(config, key, value)
 
     logger = setup_logging(quiet=True, color=False)
     logger.disabled = True
 
-    scan = scan_tree(config, logger)
+    scan = scan_tree(root, config, logger)
     notes = []
     for record in scan.notes:
         text, truncated = read_note_text(record.path, config)
