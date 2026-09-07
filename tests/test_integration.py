@@ -73,12 +73,12 @@ def test_full_run_mirrors_structure_and_copies(vault: Path) -> None:
 
 
 def test_structure_copy_creates_empty_directories(make_vault) -> None:
-    """Копируется структура, а не файлы: пустой каталог остаётся пустым."""
+    """Копируется структура, а не файлы: каталог без заметок остаётся пустым."""
     root = make_vault(
         {"Games/Doom/секрет.md": "# Секрет\n\nДробовик, демоны, gzdoom, wad.\n"},
         ("Games/Doom", "Games/Minecraft", "Linux/Arch"),
     )
-    run(root)
+    run(root, "--keep-empty-dirs")
     sorted_dir = root / SORTED_DIR_NAME
     assert (sorted_dir / "Games" / "Minecraft").is_dir()
     assert list((sorted_dir / "Games" / "Minecraft").iterdir()) == []
@@ -364,11 +364,10 @@ def test_split_layout_takes_structure_from_vault(make_vault) -> None:
     assert main(["--inbox", str(inbox), "--vault", str(root), "--no-color", "--no-config"]) == EXIT_OK
 
     sorted_dir = inbox / SORTED_DIR_NAME
-    assert (sorted_dir / "Хобби" / "Мотоциклы").is_dir()
-    assert (sorted_dir / "Хобби" / "Аквариум").is_dir()
-    assert (sorted_dir / "Linux" / "Termux").is_dir()
     assert (sorted_dir / "Хобби" / "Мотоциклы" / "обслуживание.md").is_file()
     assert (sorted_dir / "Хобби" / "Аквариум" / "уход.md").is_file()
+    # Linux/Termux зеркалируется, но заметок туда не попало — каталог убран.
+    assert not (sorted_dir / "Linux").exists()
 
 
 def test_split_layout_does_not_sort_the_vault(make_vault) -> None:
@@ -461,3 +460,119 @@ def test_cli_paths_override_saved_ones(make_vault, tmp_path: Path) -> None:
         "--inbox", str(inbox), "--output", str(other), "--no-color",
     ])
     assert other.is_dir()
+
+
+# --- Удаление пустых каталогов результата -------------------------------------
+
+
+def vault_with_unused_categories(make_vault) -> Path:
+    """Хранилище, где часть категорий заведомо останется без заметок."""
+    return make_vault(
+        {"Games/Doom/секрет.md": "# Секрет\n\nДробовик, демоны, gzdoom, wad.\n"},
+        ("Games/Doom", "Games/Minecraft", "Linux/Arch", "Пустая/Ветка/Глубоко"),
+    )
+
+
+def test_empty_directories_are_removed(make_vault) -> None:
+    """Папки, в которые не попало ни одного файла, удаляются."""
+    root = vault_with_unused_categories(make_vault)
+    assert run(root) == EXIT_OK
+    sorted_dir = root / SORTED_DIR_NAME
+    assert not (sorted_dir / "Games" / "Minecraft").exists()
+    assert not (sorted_dir / "Linux").exists()
+
+
+def test_nested_empty_chain_is_removed_entirely(make_vault) -> None:
+    """Пустая ветка удаляется целиком, а не только её лист."""
+    root = vault_with_unused_categories(make_vault)
+    run(root)
+    assert not (root / SORTED_DIR_NAME / "Пустая").exists()
+
+
+def test_directories_with_files_and_their_parents_survive(make_vault) -> None:
+    """Родитель непустого каталога остаётся, даже если своих файлов у него нет."""
+    root = vault_with_unused_categories(make_vault)
+    run(root)
+    sorted_dir = root / SORTED_DIR_NAME
+    assert (sorted_dir / "Games" / "Doom" / "секрет.md").is_file()
+    assert (sorted_dir / "Games").is_dir()
+
+
+def test_pruning_never_touches_the_source(make_vault) -> None:
+    """Удаление ограничено каталогом результата: хранилище неприкосновенно."""
+    root = vault_with_unused_categories(make_vault)
+    before = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if SORTED_DIR_NAME not in path.parts
+    )
+    run(root)
+    after = sorted(
+        path.relative_to(root).as_posix()
+        for path in root.rglob("*")
+        if SORTED_DIR_NAME not in path.parts
+    )
+    assert after == before
+    assert (root / "Games" / "Minecraft").is_dir()
+    assert (root / "Пустая" / "Ветка" / "Глубоко").is_dir()
+
+
+def test_keep_empty_dirs_disables_pruning(make_vault) -> None:
+    root = vault_with_unused_categories(make_vault)
+    run(root, "--keep-empty-dirs")
+    assert (root / SORTED_DIR_NAME / "Games" / "Minecraft").is_dir()
+    assert (root / SORTED_DIR_NAME / "Пустая" / "Ветка" / "Глубоко").is_dir()
+
+
+def test_non_empty_directory_is_kept_even_if_untouched(make_vault) -> None:
+    """Чужой файл в каталоге результата защищает его от удаления."""
+    root = vault_with_unused_categories(make_vault)
+    keeper = root / SORTED_DIR_NAME / "Games" / "Minecraft" / "моё.md"
+    keeper.parent.mkdir(parents=True)
+    keeper.write_text("# Положил вручную\n", encoding="utf-8")
+
+    run(root)
+    assert keeper.read_text(encoding="utf-8") == "# Положил вручную\n"
+
+
+def test_result_root_survives_even_when_empty(make_vault) -> None:
+    """Сам каталог результата не удаляется, даже если в нём ничего нет."""
+    root = make_vault({}, ("Games/Doom", "Linux/Arch"))
+    assert run(root) == EXIT_OK
+    assert (root / SORTED_DIR_NAME).is_dir()
+    assert list((root / SORTED_DIR_NAME).iterdir()) == []
+
+
+def test_dry_run_reports_but_deletes_nothing(make_vault, capsys: pytest.CaptureFixture[str]) -> None:
+    """Предпросмотр называет каталоги, но файловую систему не трогает."""
+    root = vault_with_unused_categories(make_vault)
+    before = tree_digest(root)
+    assert run(root, "--dry-run") == EXIT_OK
+    assert tree_digest(root) == before
+
+    output = capsys.readouterr().out
+    assert "Останутся пустыми" in output
+    assert "Games/Minecraft" in output
+
+
+def test_pruning_survives_repeated_runs(make_vault) -> None:
+    """Повторный запуск остаётся идемпотентным и с включённой очисткой."""
+    root = vault_with_unused_categories(make_vault)
+    run(root)
+    first = tree_digest(root)
+    run(root)
+    assert tree_digest(root) == first
+
+
+def test_empty_review_directory_is_removed(make_vault) -> None:
+    """Если сомнительных заметок нет, каталог _NEEDS_REVIEW не остаётся."""
+    root = make_vault(
+        {
+            "Linux/Termux/pkg.md": "# pkg\n\npkg install, репозитории termux.\n",
+            "Linux/Termux/proot.md": "# proot\n\nproot-distro, дистрибутив.\n",
+            "termux.md": "# Termux\n\npkg install python, termux-setup-storage.\n",
+        },
+        ("Linux/Termux",),
+    )
+    run(root)
+    assert not (root / SORTED_DIR_NAME / REVIEW_DIR_NAME).exists()

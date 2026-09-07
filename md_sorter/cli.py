@@ -38,7 +38,14 @@ from .models import (
 )
 from .report import Reporter
 from .scanner import read_note_text, scan_tree
-from .structure import build_categories, build_category_profiles, ensure_sorted_dir, mirror_structure
+from .structure import (
+    build_categories,
+    build_category_profiles,
+    count_unused_directories,
+    ensure_sorted_dir,
+    mirror_structure,
+    prune_empty_directories,
+)
 
 EXIT_OK = 0
 EXIT_FATAL = 1
@@ -129,6 +136,10 @@ def build_parser() -> argparse.ArgumentParser:
                        help="переносить, а не копировать (требует --allow-move)")
     write.add_argument("--allow-move", action="store_true", default=None,
                        help="подтвердить перенос исходных файлов")
+    write.add_argument("--keep-empty-dirs", dest="prune_empty", action="store_false", default=None,
+                       help="не удалять из результата папки, оставшиеся пустыми")
+    write.add_argument("--prune-empty-dirs", dest="prune_empty", action="store_true",
+                       help="удалять пустые папки результата (включено по умолчанию)")
 
     config_group = parser.add_argument_group("конфигурация")
     config_group.add_argument("--config", type=Path, default=None, help="путь к файлу конфигурации")
@@ -180,7 +191,7 @@ def build_config(args: argparse.Namespace) -> Config:
         "dry_run", "verbose", "debug", "quiet", "log_file", "color", "classifier",
         "threshold", "margin", "uncertain_strategy", "top_candidates", "embedding_model",
         "include_hidden", "follow_symlinks", "max_file_size", "max_analysis_chars",
-        "jobs", "manifest", "copy_mode", "allow_move",
+        "jobs", "manifest", "copy_mode", "allow_move", "prune_empty",
         "dominance", "min_evidence", "knn_neighbors", "self_training_rounds",
         "self_training_min_score",
     )
@@ -419,11 +430,14 @@ class Corpus:
 
 def _collect(config: Config, logger: logging.Logger) -> Corpus:
     """Обходит хранилище и inbox, разбирает найденные заметки."""
+    # Редкий случай: хранилище лежит внутри inbox — тогда его заметки нельзя
+    # принимать за несортированные.
+    nested_vault = _is_strictly_inside(config.vault_dir, config.inbox)
     inbox_scan = scan_tree(
         config.inbox,
         config,
         logger,
-        excluded_paths=[config.vault_dir] if _is_strictly_inside(config.vault_dir, config.inbox) else [],
+        excluded_paths=[config.vault_dir] if nested_vault else [],
     )
 
     if not config.split_layout:
@@ -492,6 +506,9 @@ def run(config: Config, logger: logging.Logger) -> int:
 
     if not corpus.target_notes:
         logger.info("Markdown-файлы не найдены, работа завершена")
+        if config.prune_empty:
+            # Раскладывать нечего, поэтому пусто всё зеркало целиком.
+            reporter.count_pruned(prune_empty_directories(config, logger))
         reporter.summary(corpus.errors)
         return EXIT_WITH_ERRORS if corpus.errors else EXIT_OK
 
@@ -544,8 +561,15 @@ def run(config: Config, logger: logging.Logger) -> int:
 
     if config.dry_run:
         reporter.preview([item for item in decisions if item.status is not Status.ERROR])
-    elif config.manifest:
-        save_manifest(config, new_manifest, logger, version=__version__)
+        if config.prune_empty:
+            reporter.preview_pruning(
+                count_unused_directories(mapping, _used_directories(decisions))
+            )
+    else:
+        if config.manifest:
+            save_manifest(config, new_manifest, logger, version=__version__)
+        if config.prune_empty:
+            reporter.count_pruned(prune_empty_directories(config, logger))
 
     stats = reporter.summary(corpus.errors)
     return EXIT_WITH_ERRORS if stats.errors else EXIT_OK
@@ -651,6 +675,17 @@ def _place_all(
 
         decisions.append(decision)
         reporter.progress(index, total)
+
+
+def _used_directories(decisions: Sequence[Decision]) -> set[str]:
+    """Каталоги результата, в которые действительно что-то попало."""
+    used: set[str] = set()
+    for decision in decisions:
+        if decision.destination is None:
+            continue
+        parent = decision.destination.parent.as_posix()
+        used.add("" if parent == "." else parent)
+    return used
 
 
 def _place(

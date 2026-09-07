@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Sequence
+from pathlib import PurePosixPath
 
 from .config import Config
 from .logging_setup import log_result
@@ -136,6 +137,21 @@ class Reporter:
                 line = f"{line} (как {decision.destination.name})"
             self.logger.info(line)
 
+    def count_pruned(self, removed: int) -> None:
+        """Запоминает число удалённых пустых каталогов для итоговой сводки."""
+        self.stats.pruned = removed
+
+    def preview_pruning(self, unused: Sequence[PurePosixPath]) -> None:
+        """Показывает, какие каталоги остались бы пустыми (для ``--dry-run``)."""
+        if not unused:
+            return
+        self.stats.pruned = len(unused)
+        self.logger.info("Останутся пустыми и были бы удалены: %d", len(unused))
+        for target in unused[:20]:
+            self.logger.info("  %s", target.as_posix())
+        if len(unused) > 20:
+            self.logger.info("  ... и ещё %d", len(unused) - 20)
+
     def summary(self, scan_errors: int = 0) -> Stats:
         """Печатает финальную статистику и возвращает её."""
         self.stats.errors += scan_errors
@@ -150,4 +166,10 @@ class Reporter:
             log_result(self.logger, "Уже были отсортированы ранее: %d", self.stats.identical)
         if self.stats.renamed:
             log_result(self.logger, "Переименовано из-за конфликта имён: %d", self.stats.renamed)
+        if self.stats.pruned:
+            log_result(
+                self.logger,
+                "Останутся пустыми: %d" if self.config.dry_run else "Удалено пустых каталогов: %d",
+                self.stats.pruned,
+            )
         return self.stats
