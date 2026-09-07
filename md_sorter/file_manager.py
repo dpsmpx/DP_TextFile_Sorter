@@ -155,12 +155,26 @@ def _copy_atomic(source: Path, destination: Path) -> None:
     temporary = Path(temporary_name)
     try:
         shutil.copyfile(source, temporary)
-        shutil.copystat(source, temporary)
+        _copy_metadata(temporary, source)
         os.replace(temporary, destination)
     except BaseException:
         temporary.unlink(missing_ok=True)
         destination.unlink(missing_ok=True)
         raise
+
+
+def _copy_metadata(destination: Path, source: Path) -> None:
+    """Переносит время изменения и права, но не считает это обязательным.
+
+    На Android каталог ``/sdcard`` смонтирован через FUSE: ``chmod`` и ``utime``
+    там запрещены и бросают ``PermissionError``. Содержимое файла при этом
+    копируется нормально, поэтому метаданные — не повод объявлять копирование
+    неудачным.
+    """
+    try:
+        shutil.copystat(source, destination)
+    except OSError:
+        pass
 
 
 def manifest_path(config: Config) -> Path:
