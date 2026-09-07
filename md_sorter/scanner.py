@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 
@@ -38,18 +39,35 @@ def _relative_posix(path: Path, root: Path) -> PurePosixPath:
     return PurePosixPath(path.relative_to(root).as_posix())
 
 
-def scan_tree(config: Config, logger: logging.Logger) -> ScanResult:
-    """Обходит ROOT и возвращает заметки и структуру каталогов.
+def scan_tree(
+    base: Path,
+    config: Config,
+    logger: logging.Logger,
+    *,
+    excluded_paths: Sequence[Path] = (),
+) -> ScanResult:
+    """Обходит каталог и возвращает заметки и структуру подкаталогов.
 
-    Ошибки отдельных файлов и каталогов логируются и не прерывают обход.
+    Args:
+        base: каталог, от которого считаются относительные пути.
+        config: параметры сканирования.
+        logger: журнал; ошибки отдельных файлов не прерывают обход.
+        excluded_paths: ветки, которые нужно полностью пропустить, — каталог
+            результата, а при раздельной схеме ещё и inbox внутри хранилища.
+
+    Returns:
+        Найденные заметки и подкаталоги относительно ``base``.
     """
-    root = config.root
+    root = base
     result = ScanResult()
     ignored = {name.lower() for name in config.ignored_directories}
-    try:
-        sorted_dir_real = config.sorted_dir.resolve()
-    except OSError:  # pragma: no cover - недоступный путь
-        sorted_dir_real = config.sorted_dir
+
+    excluded: set[Path] = set()
+    for path in (config.sorted_dir, *excluded_paths):
+        try:
+            excluded.add(path.resolve())
+        except OSError:  # pragma: no cover - недоступный путь
+            excluded.add(path)
 
     visited: set[tuple[int, int]] = set()
     stack: list[Path] = [root]
@@ -77,7 +95,7 @@ def scan_tree(config: Config, logger: logging.Logger) -> ScanResult:
                     result=result,
                     stack=stack,
                     ignored=ignored,
-                    sorted_dir_real=sorted_dir_real,
+                    excluded=excluded,
                     visited=visited,
                 )
             except OSError as exc:
@@ -98,7 +116,7 @@ def _handle_entry(
     result: ScanResult,
     stack: list[Path],
     ignored: set[str],
-    sorted_dir_real: Path,
+    excluded: set[Path],
     visited: set[tuple[int, int]],
 ) -> None:
     """Обрабатывает один элемент каталога: каталог, файл или ссылку."""
@@ -122,8 +140,8 @@ def _handle_entry(
             resolved = path.resolve()
         except OSError:
             resolved = path
-        if resolved == sorted_dir_real or _is_within(resolved, sorted_dir_real):
-            logger.debug("Каталог результата исключён: %s", _safe_rel(path, root))
+        if any(resolved == item or _is_within(resolved, item) for item in excluded):
+            logger.debug("Ветка исключена из обхода: %s", _safe_rel(path, root))
             return
         if config.follow_symlinks:
             # Отмечается каждый каталог, а не только ссылка: иначе ссылка на

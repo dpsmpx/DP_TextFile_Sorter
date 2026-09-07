@@ -128,15 +128,21 @@ def test_changed_source_creates_new_copy_without_touching_old(vault: Path) -> No
 
 
 def test_name_conflicts_are_suffixed(make_vault) -> None:
+    """Одинаковые имена из разных подпапок inbox не должны затирать друг друга."""
     root = make_vault(
         {
-            "A/note.md": "# Termux\n\npkg install, termux-setup-storage, android.\n",
-            "B/note.md": "# Termux иначе\n\npkg upgrade, proot, хранилище телефона.\n",
+            "Linux/Termux/pkg.md": "# pkg\n\npkg install, pkg upgrade, репозитории.\n",
+            "Linux/Termux/storage.md": "# Хранилище\n\ntermux-setup-storage, доступ к файлам.\n",
+            "Linux/Termux/proot.md": "# proot\n\nproot-distro, дистрибутив внутри termux.\n",
+            "INBOX/Входящее/note.md": "# Termux\n\npkg install python, termux-setup-storage.\n",
+            "INBOX/Черновики/note.md": "# Termux иначе\n\npkg upgrade, proot, android.\n",
         },
         ("Linux/Termux",),
     )
-    run(root)
-    termux = root / SORTED_DIR_NAME / "Linux" / "Termux"
+    assert main(
+        ["--inbox", str(root / "INBOX"), "--vault", str(root), "--no-color", "--no-config"]
+    ) == EXIT_OK
+    termux = root / "INBOX" / SORTED_DIR_NAME / "Linux" / "Termux"
     names = sorted(path.name for path in termux.glob("*.md"))
     assert names == ["note.md", "note_1.md"]
 
@@ -328,3 +334,130 @@ def test_evaluate_without_filed_notes_is_fatal(make_vault) -> None:
     """Без разложенных заметок измерять нечего — об этом надо сказать прямо."""
     root = make_vault({"a.md": "# Termux\n\npkg install\n"}, ("Linux/Termux",))
     assert main(["--root", str(root), "--no-color", "--no-config", "--evaluate"]) == EXIT_FATAL
+
+
+# --- Раздельная схема: хранилище отдельно, inbox отдельно --------------------
+
+
+def split_vault(make_vault) -> Path:
+    """Хранилище вида ХРАНИЛИЩЕ/INBOX: категории снаружи, заметки внутри."""
+    return make_vault(
+        {
+            "Хобби/Мотоциклы/масло.md": "# Масло\n\nЗамена масла, фильтр, уровень.\n",
+            "Хобби/Мотоциклы/цепь.md": "# Цепь\n\nСмазка цепи, натяжение, звёзды.\n",
+            "Хобби/Мотоциклы/колодки.md": "# Колодки\n\nТормозные колодки, прокачка.\n",
+            "Хобби/Аквариум/вода.md": "# Вода\n\nПодмена воды, сифонка грунта, нитраты.\n",
+            "Хобби/Аквариум/фильтр.md": "# Фильтр\n\nВнешний фильтр, промывка губки.\n",
+            "Linux/Termux/pkg.md": "# pkg\n\npkg install, репозитории termux.\n",
+            "INBOX/обслуживание.md": "# Обслуживание\n\nПроверил натяжение цепи и уровень масла.\n",
+            "INBOX/уход.md": "# Уход\n\nПромыл губку, проверил нитраты, сифонил грунт.\n",
+        },
+        ("Хобби/Мотоциклы", "Хобби/Аквариум", "Linux/Termux"),
+        name="MAIN_OBSIDIAN_PC",
+    )
+
+
+def test_split_layout_takes_structure_from_vault(make_vault) -> None:
+    """Категории берутся из хранилища, а раскладываются только заметки inbox."""
+    root = split_vault(make_vault)
+    inbox = root / "INBOX"
+    assert main(["--inbox", str(inbox), "--vault", str(root), "--no-color", "--no-config"]) == EXIT_OK
+
+    sorted_dir = inbox / SORTED_DIR_NAME
+    assert (sorted_dir / "Хобби" / "Мотоциклы").is_dir()
+    assert (sorted_dir / "Хобби" / "Аквариум").is_dir()
+    assert (sorted_dir / "Linux" / "Termux").is_dir()
+    assert (sorted_dir / "Хобби" / "Мотоциклы" / "обслуживание.md").is_file()
+    assert (sorted_dir / "Хобби" / "Аквариум" / "уход.md").is_file()
+
+
+def test_split_layout_does_not_sort_the_vault(make_vault) -> None:
+    """Заметки хранилища — обучающий материал, копировать их нельзя."""
+    root = split_vault(make_vault)
+    inbox = root / "INBOX"
+    main(["--inbox", str(inbox), "--vault", str(root), "--no-color", "--no-config"])
+
+    copied = {path.name for path in (inbox / SORTED_DIR_NAME).rglob("*.md")}
+    assert copied == {"обслуживание.md", "уход.md"}
+    assert (root / "Хобби" / "Мотоциклы" / "цепь.md").is_file()
+
+
+def test_split_layout_excludes_inbox_from_categories(make_vault) -> None:
+    """Сам INBOX не должен стать категорией назначения."""
+    root = split_vault(make_vault)
+    inbox = root / "INBOX"
+    main(["--inbox", str(inbox), "--vault", str(root), "--no-color", "--no-config"])
+    assert not (inbox / SORTED_DIR_NAME / "INBOX").exists()
+
+
+def test_split_layout_result_stays_in_inbox(make_vault) -> None:
+    """Результат по умолчанию складывается в inbox, а не в хранилище."""
+    root = split_vault(make_vault)
+    main(["--inbox", str(root / "INBOX"), "--vault", str(root), "--no-color", "--no-config"])
+    assert (root / "INBOX" / SORTED_DIR_NAME).is_dir()
+    assert not (root / SORTED_DIR_NAME).exists()
+
+
+def test_output_directory_can_be_moved(make_vault, tmp_path: Path) -> None:
+    """Каталог результата задаётся явно."""
+    root = split_vault(make_vault)
+    target = tmp_path / "Разложенное"
+    main([
+        "--inbox", str(root / "INBOX"), "--vault", str(root),
+        "--output", str(target), "--no-color", "--no-config",
+    ])
+    assert (target / "Хобби" / "Мотоциклы" / "обслуживание.md").is_file()
+    assert not (root / "INBOX" / SORTED_DIR_NAME).exists()
+
+
+def test_split_layout_is_idempotent(make_vault) -> None:
+    root = split_vault(make_vault)
+    args = ["--inbox", str(root / "INBOX"), "--vault", str(root), "--no-color", "--no-config"]
+    main(args)
+    first = tree_digest(root)
+    main(args)
+    assert tree_digest(root) == first
+
+
+def test_saved_paths_are_reused_without_flags(make_vault) -> None:
+    """Пути сохраняются один раз и дальше не вводятся."""
+    root = split_vault(make_vault)
+    inbox = root / "INBOX"
+
+    assert main([
+        "--inbox", str(inbox), "--vault", str(root),
+        "--save-config", "--dry-run", "--no-color",
+    ]) == EXIT_OK
+    saved = inbox / "md_sorter.toml"
+    assert saved.is_file()
+    assert str(root) in saved.read_text(encoding="utf-8")
+
+    # Запуск без единого флага пути: настройки берутся из сохранённого файла.
+    assert main(["--inbox", str(inbox), "--no-color"]) == EXIT_OK
+    assert (inbox / SORTED_DIR_NAME / "Хобби" / "Мотоциклы" / "обслуживание.md").is_file()
+
+
+def test_saved_config_keeps_tuned_settings(make_vault) -> None:
+    """Сохраняются не только пути, но и подобранные параметры."""
+    root = split_vault(make_vault)
+    inbox = root / "INBOX"
+    main([
+        "--inbox", str(inbox), "--vault", str(root), "--threshold", "0.31",
+        "--uncertain-strategy", "best", "--save-config", "--dry-run", "--no-color",
+    ])
+    text = (inbox / "md_sorter.toml").read_text(encoding="utf-8")
+    assert "threshold = 0.31" in text
+    assert 'uncertain_strategy = "best"' in text
+    assert "dry_run" not in text  # режим одного запуска не сохраняется
+
+
+def test_cli_paths_override_saved_ones(make_vault, tmp_path: Path) -> None:
+    root = split_vault(make_vault)
+    inbox = root / "INBOX"
+    main(["--inbox", str(inbox), "--vault", str(root), "--save-config", "--dry-run", "--no-color"])
+
+    other = tmp_path / "Другое"
+    main([
+        "--inbox", str(inbox), "--output", str(other), "--no-color",
+    ])
+    assert other.is_dir()

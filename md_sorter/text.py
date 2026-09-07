@@ -9,7 +9,7 @@ from __future__ import annotations
 import math
 import re
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Container, Iterable, Mapping, Sequence
 
 from .models import TokenBag
 
@@ -347,17 +347,38 @@ def compute_idf(documents: Sequence[Iterable[str]]) -> tuple[dict[str, float], f
     return idf, math.log(total + 1) + 1.0
 
 
+def sublinear(weight: float) -> float:
+    """Сжимает вес признака по правилу ``1 + ln(w)``.
+
+    Без этого один редкий токен способен занять почти всю норму вектора: слово
+    из имени файла получает вес 3.0, вместе с заголовком и текстом — 6.5, и
+    после умножения на максимальный IDF оно вытесняет содержательные термины.
+    Логарифм сохраняет порядок важности признаков, но сокращает разрыв.
+    """
+    return 1.0 + math.log(weight) if weight > 1.0 else weight
+
+
 def to_vector(
     bag: Mapping[str, float],
     idf: Mapping[str, float],
     default_idf: float,
+    vocabulary: Container[str] | None = None,
 ) -> TokenBag:
-    """Строит L2-нормализованный IDF-взвешенный вектор из мешка токенов."""
+    """Строит L2-нормализованный IDF-взвешенный вектор из мешка токенов.
+
+    Args:
+        vocabulary: если задан, токены вне его отбрасываются до нормировки.
+            Слово, которого нет ни в одной категории и ни в одной разложенной
+            заметке, не может повлиять на выбор категории, но при нормировке
+            съедает долю нормы и глушит содержательные термины.
+    """
     vector: TokenBag = {}
     for token, weight in bag.items():
         if weight <= 0.0:
             continue
-        vector[token] = weight * idf.get(token, default_idf)
+        if vocabulary is not None and token not in vocabulary:
+            continue
+        vector[token] = sublinear(weight) * idf.get(token, default_idf)
     norm = math.sqrt(sum(value * value for value in vector.values()))
     if norm <= 0.0:
         return {}

@@ -51,7 +51,7 @@ def config_factory() -> Callable[..., Config]:
     """Фабрика конфигураций с переопределением отдельных полей."""
 
     def _factory(root: Path, **overrides: object) -> Config:
-        config = Config(root=root)
+        config = Config(inbox=root)
         for key, value in overrides.items():
             setattr(config, key, value)
         return config

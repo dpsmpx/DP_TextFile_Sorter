@@ -47,7 +47,7 @@ def test_mirror_creates_only_directories(tmp_path) -> None:
     (root / "Programming" / "Python").mkdir(parents=True)
     (root / "Programming" / "Python" / "note.md").write_text("# note", encoding="utf-8")
 
-    config = Config(root=root)
+    config = Config(inbox=root)
     import logging
 
     logger = logging.getLogger("md_sorter.test")
@@ -64,7 +64,7 @@ def test_mirror_is_noop_in_dry_run(tmp_path) -> None:
 
     root = tmp_path / "INBOX"
     root.mkdir()
-    config = Config(root=root, dry_run=True)
+    config = Config(inbox=root, dry_run=True)
     mapping = mirror_structure(paths("Games", "Games/Doom"), config, logging.getLogger("md_sorter.test"))
     assert not (root / SORTED_DIR_NAME).exists()
     assert mapping["Games/Doom"].as_posix() == "Games/Doom"
@@ -79,7 +79,7 @@ def test_mirror_preserves_existing_content(tmp_path) -> None:
     keeper = existing / "old.md"
     keeper.write_text("# уже отсортировано", encoding="utf-8")
 
-    config = Config(root=root)
+    config = Config(inbox=root)
     mirror_structure(paths("Linux", "Linux/Arch"), config, logging.getLogger("md_sorter.test"))
     assert keeper.read_text(encoding="utf-8") == "# уже отсортировано"
 

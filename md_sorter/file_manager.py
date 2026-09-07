@@ -212,7 +212,7 @@ def save_manifest(
 ) -> None:
     """Атомарно записывает файл состояния."""
     path = manifest_path(config)
-    payload = {"version": version, "root": str(config.root), "entries": entries}
+    payload = {"version": version, "inbox": str(config.inbox), "vault": str(config.vault_dir), "entries": entries}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         handle, temporary_name = tempfile.mkstemp(
