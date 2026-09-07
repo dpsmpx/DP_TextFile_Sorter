@@ -1,0 +1,15 @@
+# Дополнительные классификаторы. Ни один из них не нужен для работы программы
+# по умолчанию (--classifier lexical).
+
+# --classifier tfidf
+scikit-learn>=1.4
+
+# --classifier embeddings и --classifier hybrid
+sentence-transformers>=2.7
+
+# --classifier llm (требует также ANTHROPIC_API_KEY)
+anthropic>=0.40
+
+# Ускоряет и делает строже разбор YAML frontmatter; при отсутствии
+# используется встроенный парсер подмножества YAML.
+PyYAML>=6.0

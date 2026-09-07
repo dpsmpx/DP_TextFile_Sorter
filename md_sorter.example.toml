@@ -1,0 +1,62 @@
+# Пример конфигурации md_sorter.
+#
+# Файл ищется в корне хранилища под именем md_sorter.toml или .md_sorter.toml.
+# Любой параметр можно переопределить аргументом командной строки — CLI важнее.
+# Все параметры необязательны: программа работает и без этого файла.
+
+[md_sorter]
+# --- классификация -----------------------------------------------------------
+# Минимальная оценка для уверенного решения (0..1).
+threshold = 0.22
+
+# Минимальный отрыв лидера от второго места; иначе решение считается спорным.
+margin = 0.06
+
+# Что делать с сомнительными заметками: review | ancestor | root | skip
+uncertain_strategy = "review"
+
+# Алгоритм: lexical (по умолчанию, без зависимостей) | tfidf | embeddings | llm | hybrid
+classifier = "lexical"
+
+# Модель для --classifier embeddings.
+embedding_model = "paraphrase-multilingual-MiniLM-L12-v2"
+
+# Модель для --classifier llm.
+llm_model = "claude-opus-5"
+
+# Сколько вариантов показывать в --verbose.
+top_candidates = 3
+
+# --- сканирование ------------------------------------------------------------
+ignored_directories = [
+    "Sorted_md_files", ".git", ".obsidian", ".trash", "node_modules", "__pycache__",
+]
+include_hidden = false
+follow_symlinks = false
+max_file_size = 5242880      # 5 МБ
+max_analysis_chars = 40000
+jobs = 1                     # 0 — выбрать число процессов автоматически
+
+# --- запись ------------------------------------------------------------------
+dry_run = false
+copy_mode = "copy"           # "move" дополнительно требует --allow-move
+manifest = false             # вести Sorted_md_files/.md_sorter_manifest.json
+
+# --- собственные термины категорий -------------------------------------------
+# Ключ — путь категории относительно корня, значение — характерные для неё слова.
+# Это основной способ подстроить классификацию под своё хранилище без правки кода.
+[md_sorter.aliases]
+"Linux/Termux" = ["термукс", "телефон", "pkg", "proot"]
+"Games/ULTRAKILL" = ["hakita", "ранг", "стиль", "слой"]
+"Hobby/Moto" = ["мотоцикл", "цепь", "масло", "пробег"]
+
+# --- тонкая настройка весов (менять редко) -----------------------------------
+[md_sorter.weights]
+filename = 3.0
+inline_tags = 3.0
+title = 2.5
+code_language = 2.5
+body = 1.0
+parent_support = 0.35
+depth_bonus = 0.06
+source_path_prior = 0.10
