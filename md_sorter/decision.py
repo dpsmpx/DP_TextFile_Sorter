@@ -30,13 +30,41 @@ def _is_related(first: str, second: str) -> bool:
     return first.startswith(f"{second}/") or second.startswith(f"{first}/")
 
 
+def _first_rival(ranked: Sequence[Candidate]) -> Candidate | None:
+    """Лучший кандидат, не связанный с лидером отношением предок/потомок.
+
+    Потомок лидера — не соперник, а уточнение: спор между ``Linux`` и
+    ``Linux/Arch`` решается правилом конкретности, а не порогом.
+    """
+    if not ranked:
+        return None
+    leader = ranked[0].category
+    for candidate in ranked[1:]:
+        if not _is_related(leader, candidate.category):
+            return candidate
+    return None
+
+
 def decide(
     record: NoteRecord,
     candidates: Sequence[Candidate],
     categories: dict[str, Category],
     config: Config,
 ) -> Decision:
-    """Выбирает категорию для заметки или помечает решение сомнительным."""
+    """Выбирает категорию для заметки или помечает решение сомнительным.
+
+    Решение принимается по двум независимым основаниям:
+
+    1. **абсолютное** — оценка лидера не ниже ``threshold``;
+    2. **относительное** — лидер оторвался от ближайшего несвязанного
+       соперника не менее чем в ``dominance`` раз и набрал хотя бы
+       ``min_evidence``.
+
+    Второе основание существует потому, что абсолютная величина косинуса
+    зависит от «толщины» профиля категории. У личных категорий пользователя
+    («Хобби/Мотоциклы») профиль состоит из пары слов, и даже очевидное
+    совпадение даёт низкую оценку. Отрыв от соперников от этого не зависит.
+    """
     ranked = list(candidates)
     if not categories:
         return Decision(
@@ -54,62 +82,80 @@ def decide(
         )
 
     best = ranked[0]
-    if best.score < config.threshold:
+    rival = _first_rival(ranked)
+    rival_score = rival.score if rival is not None else 0.0
+
+    confident = best.score >= config.threshold
+    dominant = best.score >= max(config.min_evidence, rival_score * config.dominance)
+
+    # Спорный случай: соперник рядом, и лидер его не подавляет.
+    if rival is not None and not dominant and (best.score - rival_score) < config.margin:
+        fallback = _parent_fallback(record, best, rival, ranked, categories, config)
+        if fallback is not None:
+            return fallback
         return Decision(
             record=record,
             status=Status.UNCERTAIN,
             score=best.score,
             reason=(
-                f"лучшая оценка {best.score:.2f} ниже порога {config.threshold:.2f} "
-                f"(ближайший кандидат: {best.category})"
+                f"неоднозначность: «{best.category}» {best.score:.2f} и "
+                f"«{rival.category}» {rival_score:.2f} "
+                f"(разница {best.score - rival_score:.2f} < {config.margin:.2f})"
             ),
             candidates=ranked,
         )
 
-    if len(ranked) > 1:
-        second = ranked[1]
-        gap = best.score - second.score
-        if gap < config.margin and not _is_related(best.category, second.category):
-            parent_key = _common_parent(best.category, second.category)
-            parent = categories.get(parent_key) if parent_key else None
-            parent_candidate = next(
-                (item for item in ranked if item.category == parent_key), None
-            )
-            resolved_by_parent = (
-                parent is not None
-                and parent_candidate is not None
-                and parent_candidate.score >= config.threshold
-            )
-            if resolved_by_parent:
-                return Decision(
-                    record=record,
-                    status=Status.SORTED,
-                    category=parent_key,
-                    score=parent_candidate.score,
-                    reason=(
-                        f"«{best.category}» и «{second.category}» почти равны "
-                        f"(разница {gap:.2f}); выбран общий родитель"
-                    ),
-                    candidates=ranked,
-                )
-            return Decision(
-                record=record,
-                status=Status.UNCERTAIN,
-                score=best.score,
-                reason=(
-                    f"неоднозначность: «{best.category}» {best.score:.2f} и "
-                    f"«{second.category}» {second.score:.2f} (разница {gap:.2f} < {config.margin:.2f})"
-                ),
-                candidates=ranked,
-            )
+    if not confident and not dominant:
+        return Decision(
+            record=record,
+            status=Status.UNCERTAIN,
+            score=best.score,
+            reason=(
+                f"слабый сигнал: «{best.category}» набрал {best.score:.2f} "
+                f"при пороге {config.threshold:.2f} и не оторвался от соперников"
+            ),
+            candidates=ranked,
+        )
+
+    reason = best.evidence[0] if best.evidence else "наибольшая смысловая близость"
+    if not confident:
+        reason = f"{reason}; лидер вне конкуренции (соперник {rival_score:.2f})"
 
     return Decision(
         record=record,
         status=Status.SORTED,
         category=best.category,
         score=best.score,
-        reason=best.evidence[0] if best.evidence else "наибольшая смысловая близость",
+        reason=reason,
         candidates=ranked,
+    )
+
+
+def _parent_fallback(
+    record: NoteRecord,
+    best: Candidate,
+    rival: Candidate,
+    ranked: Sequence[Candidate],
+    categories: dict[str, Category],
+    config: Config,
+) -> Decision | None:
+    """Спор двух соседей решается в пользу их общего родителя, если он подходит."""
+    parent_key = _common_parent(best.category, rival.category)
+    if not parent_key or parent_key not in categories:
+        return None
+    parent_candidate = next((item for item in ranked if item.category == parent_key), None)
+    if parent_candidate is None or parent_candidate.score < config.threshold:
+        return None
+    return Decision(
+        record=record,
+        status=Status.SORTED,
+        category=parent_key,
+        score=parent_candidate.score,
+        reason=(
+            f"«{best.category}» и «{rival.category}» почти равны "
+            f"(разница {best.score - rival.score:.2f}); выбран общий родитель"
+        ),
+        candidates=list(ranked),
     )
 
 
@@ -128,6 +174,9 @@ def resolve_destination(
         return mapping.get(decision.category, PurePosixPath(decision.category))
 
     strategy = config.uncertain_strategy
+    if strategy == "best" and decision.candidates:
+        best = decision.candidates[0].category
+        return mapping.get(best, PurePosixPath(best))
     if strategy == "skip":
         return None
     if strategy == "root":

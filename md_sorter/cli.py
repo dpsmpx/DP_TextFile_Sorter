@@ -16,7 +16,7 @@ from .classifier.base import Classifier
 from .config import Config, ConfigError, apply_config_data, find_config_file, load_config_file, validate
 from .decision import decide, resolve_destination
 from .file_manager import PlacementResult, load_manifest, place_note, save_manifest
-from .logging_setup import setup_logging
+from .logging_setup import log_result, setup_logging
 from .markdown_parser import parse_note
 from .models import (
     Category,
@@ -53,6 +53,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--root", type=Path, default=None, help="каталог хранилища (по умолчанию — текущий)")
     parser.add_argument("--dry-run", action="store_true", default=None,
                         help="только показать план, ничего не копировать")
+    parser.add_argument("--evaluate", action="store_true",
+                        help="измерить качество на уже разложенных заметках "
+                             "этого хранилища и выйти")
 
     output = parser.add_argument_group("вывод")
     output.add_argument("-v", "--verbose", action="store_true", default=None, help="объяснять каждое решение")
@@ -70,8 +73,20 @@ def build_parser() -> argparse.ArgumentParser:
                       help="алгоритм классификации")
     algo.add_argument("--threshold", type=float, default=None, help="минимальный score для уверенного решения")
     algo.add_argument("--margin", type=float, default=None, help="минимальный отрыв лидера от второго места")
-    algo.add_argument("--uncertain-strategy", choices=("review", "ancestor", "root", "skip"), default=None,
-                      help="что делать с сомнительными заметками")
+    algo.add_argument("--uncertain-strategy",
+                      choices=("review", "ancestor", "root", "skip", "best"), default=None,
+                      help="что делать с сомнительными заметками "
+                           "(best — всё равно положить к лучшему кандидату)")
+    algo.add_argument("--dominance", type=float, default=None,
+                      help="во сколько раз лидер должен обойти соперника")
+    algo.add_argument("--min-evidence", type=float, default=None,
+                      help="минимальная оценка для относительного правила приёма")
+    algo.add_argument("--knn-neighbors", type=int, default=None,
+                      help="сколько соседних разложенных заметок голосует")
+    algo.add_argument("--self-training-rounds", type=int, default=None,
+                      help="проходов самообучения на уверенных решениях (0 — отключить)")
+    algo.add_argument("--self-training-min-score", type=float, default=None,
+                      help="минимальная оценка решения, чтобы стать обучающим примером")
     algo.add_argument("--top-candidates", type=int, default=None, help="сколько вариантов показывать")
     algo.add_argument("--embedding-model", default=None, help="модель для классификатора embeddings")
 
@@ -125,6 +140,8 @@ def build_config(args: argparse.Namespace) -> Config:
         "threshold", "margin", "uncertain_strategy", "top_candidates", "embedding_model",
         "include_hidden", "follow_symlinks", "max_file_size", "max_analysis_chars",
         "jobs", "manifest", "copy_mode", "allow_move",
+        "dominance", "min_evidence", "knn_neighbors", "self_training_rounds",
+        "self_training_min_score",
     )
     for name in overridable:
         value = getattr(args, name, None)
@@ -236,6 +253,77 @@ def _validate_root(config: Config) -> None:
         raise ConfigError(f"Нет прав на запись в каталог: {root}")
 
 
+def evaluate(config: Config, logger: logging.Logger) -> int:
+    """Измеряет качество классификации на уже разложенных заметках хранилища.
+
+    Заметки, которые пользователь сам положил в категории, — готовая разметка:
+    можно проверить, угадывает ли программа его собственный выбор, и подобрать
+    параметры под конкретное хранилище, ничего при этом не копируя.
+    """
+    _validate_root(config)
+    logger.info("Root: %s", config.root)
+    logger.info("Проверка на уже разложенных заметках...")
+
+    scan = scan_tree(config, logger)
+    categories = build_categories(scan.directories)
+    if not scan.notes or not categories:
+        logger.error("Недостаточно данных: нужны категории и разложенные по ним заметки")
+        return EXIT_FATAL
+
+    parsed, _ = parse_notes(scan.notes, config, logger)
+    notes_by_category = build_category_profiles(categories, parsed, config)
+    categories_by_key = {category.key: category for category in categories}
+
+    classifier = create_classifier(config)
+    classifier.fit(parsed, categories, notes_by_category)
+    try:
+        verdicts = _decide_all(parsed, classifier, categories_by_key, config)
+        verdicts = _self_train(parsed, classifier, categories_by_key, config, logger, verdicts)
+    finally:
+        classifier.close()
+
+    total = accepted = correct = top1 = 0
+    misses: dict[str, int] = {}
+    for note, verdict in zip(parsed, verdicts):
+        expected = note.record.source_dir.as_posix()
+        if expected not in categories_by_key:
+            continue  # заметка лежит в корне — правильного ответа нет
+        total += 1
+        if verdict.candidates and verdict.candidates[0].category == expected:
+            top1 += 1
+        if verdict.status is Status.SORTED:
+            accepted += 1
+            if verdict.category == expected:
+                correct += 1
+            else:
+                misses[expected] = misses.get(expected, 0) + 1
+
+    if total == 0:
+        logger.error(
+            "В категориях нет ни одной заметки — измерять не на чем. "
+            "Разложите вручную хотя бы по нескольку заметок в каждую папку."
+        )
+        return EXIT_FATAL
+
+    log_result(logger, "Заметок с известной категорией: %d", total)
+    log_result(logger, "Лучший кандидат совпал с вашим выбором: %.1f%%", 100.0 * top1 / total)
+    log_result(logger, "Принято решений (полнота): %.1f%%", 100.0 * accepted / total)
+    if accepted:
+        log_result(logger, "Из принятых верно: %.1f%%", 100.0 * correct / accepted)
+
+    if misses:
+        logger.info("Категории с наибольшим числом расхождений:")
+        for key, count in sorted(misses.items(), key=lambda item: -item[1])[:5]:
+            logger.info("  %s — %d", key, count)
+
+    if accepted < total * 0.9:
+        logger.info(
+            "Полноту можно поднять: --threshold пониже, --dominance ближе к 1.0 "
+            "или --uncertain-strategy best"
+        )
+    return EXIT_OK
+
+
 def run(config: Config, logger: logging.Logger) -> int:
     """Выполняет полный цикл: обход, классификацию, размещение, отчёт."""
     _validate_root(config)
@@ -281,10 +369,11 @@ def run(config: Config, logger: logging.Logger) -> int:
 
     total = len(parsed)
     try:
-        _classify_all(
+        verdicts = _decide_all(parsed, classifier, categories_by_key, config)
+        verdicts = _self_train(parsed, classifier, categories_by_key, config, logger, verdicts)
+        _place_all(
             parsed=parsed,
-            classifier=classifier,
-            categories_by_key=categories_by_key,
+            verdicts=verdicts,
             mapping=mapping,
             config=config,
             logger=logger,
@@ -308,11 +397,61 @@ def run(config: Config, logger: logging.Logger) -> int:
 
 
 
-def _classify_all(
-    *,
+def _decide_all(
     parsed: Sequence[ParsedNote],
     classifier: Classifier,
     categories_by_key: dict[str, Category],
+    config: Config,
+) -> list[Decision]:
+    """Классифицирует все заметки, ничего не копируя и не печатая."""
+    return [
+        decide(note.record, classifier.rank(note, index), categories_by_key, config)
+        for index, note in enumerate(parsed)
+    ]
+
+
+def _self_train(
+    parsed: Sequence[ParsedNote],
+    classifier: Classifier,
+    categories_by_key: dict[str, Category],
+    config: Config,
+    logger: logging.Logger,
+    verdicts: list[Decision],
+) -> list[Decision]:
+    """Возвращает уверенные решения в обучающий набор и переклассифицирует.
+
+    В хранилище, где пользователь ещё ничего не разложил, категории описаны
+    только своими названиями. Первый проход опознаёт то, что названо прямо;
+    эти заметки становятся примерами, по которым второй проход узнаёт всё
+    остальное. Обучение идёт только на уверенных решениях, поэтому сомнительные
+    случаи не размножают собственную ошибку.
+    """
+    for round_number in range(1, max(0, config.self_training_rounds) + 1):
+        seeds = {
+            index: verdict.category
+            for index, verdict in enumerate(verdicts)
+            if verdict.status is Status.SORTED
+            and verdict.category
+            and verdict.score >= config.self_training_min_score
+        }
+        if not seeds:
+            break
+        added = classifier.learn_from(seeds)
+        if added == 0:
+            break
+        logger.debug(
+            "Проход самообучения %d: в обучающий набор добавлено %d заметок",
+            round_number,
+            added,
+        )
+        verdicts = _decide_all(parsed, classifier, categories_by_key, config)
+    return verdicts
+
+
+def _place_all(
+    *,
+    parsed: Sequence[ParsedNote],
+    verdicts: Sequence[Decision],
     mapping: dict[str, PurePosixPath],
     config: Config,
     logger: logging.Logger,
@@ -323,9 +462,8 @@ def _classify_all(
     reserved: set[str],
     total: int,
 ) -> None:
-    """Классифицирует и размещает каждую заметку, наполняя отчёт и манифест."""
-    for index, note in enumerate(parsed, start=1):
-        decision = decide(note.record, classifier.rank(note, index - 1), categories_by_key, config)
+    """Размещает заметки согласно решениям, наполняя отчёт и манифест."""
+    for index, (note, decision) in enumerate(zip(parsed, verdicts), start=1):
         target = resolve_destination(decision, mapping, config)
         reporter.report_decision(decision)
 
@@ -407,6 +545,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     try:
+        if args.evaluate:
+            return evaluate(config, logger)
         return run(config, logger)
     except ConfigError as exc:
         logger.error("%s", exc)

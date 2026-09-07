@@ -190,9 +190,49 @@ def test_source_path_prior_helps_when_content_is_thin() -> None:
     assert decision.category in {"Linux/Termux", None}
 
 
-def test_high_threshold_makes_everything_uncertain() -> None:
+def test_dominant_leader_is_accepted_below_absolute_threshold() -> None:
+    """Абсолютная величина косинуса зависит от «толщины» профиля категории.
+
+    Поэтому лидер, оторвавшийся от соперников, принимается даже при заведомо
+    недостижимом пороге — иначе личные категории пользователя, которых нет во
+    встроенном словаре, никогда не набирали бы нужную оценку.
+    """
     decisions = classify_corpus(threshold=0.99)
+    sorted_names = [
+        name for name, item in decisions.items() if item.status is Status.SORTED
+    ]
+    assert sorted_names, "относительное правило должно принимать явных лидеров"
+    assert decisions["termux storage.md"].category == "Linux/Termux"
+
+
+def test_strict_settings_make_everything_uncertain() -> None:
+    """Оба основания для приёма отключаются независимо друг от друга."""
+    decisions = classify_corpus(threshold=0.99, min_evidence=1.0)
     assert all(item.status is Status.UNCERTAIN for item in decisions.values())
+
+
+def test_weak_leader_without_dominance_is_uncertain() -> None:
+    """Слабый сигнал без отрыва от соперников остаётся сомнительным."""
+    categories = build_categories([PurePosixPath(item) for item in DIRECTORIES])
+    config = Config(root=Path("/tmp"))
+    record = build_note("x.md", "# x").record
+    candidates = [
+        Candidate(category="Linux/Arch", score=0.04),
+        Candidate(category="Games/Doom", score=0.035),
+    ]
+    decision = decide(record, candidates, {c.key: c for c in categories}, config)
+    assert decision.status is Status.UNCERTAIN
+
+
+def test_single_weak_candidate_is_accepted_when_alone() -> None:
+    """Если конкурентов нет вовсе, слабого, но реального сигнала достаточно."""
+    categories = build_categories([PurePosixPath(item) for item in DIRECTORIES])
+    config = Config(root=Path("/tmp"))
+    record = build_note("x.md", "# x").record
+    candidates = [Candidate(category="Linux/Arch", score=0.09)]
+    decision = decide(record, candidates, {c.key: c for c in categories}, config)
+    assert decision.status is Status.SORTED
+    assert decision.category == "Linux/Arch"
 
 
 def test_ambiguous_siblings_fall_back_to_parent() -> None:
