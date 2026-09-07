@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Результат работы программы и её служебные файлы — не для репозитория.
+Sorted_md_files/
+md_sorter.toml
+.md_sorter.toml
+*.log
