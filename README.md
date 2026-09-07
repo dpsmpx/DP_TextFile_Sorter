@@ -91,6 +91,31 @@ pip install PyYAML                # более строгий разбор front
 Проверено на Linux, Windows и Termux/Android. Абсолютных путей в коде нет,
 все пути строятся через `pathlib`.
 
+### Termux / Android
+
+```bash
+pkg update && pkg upgrade
+pkg install python
+termux-setup-storage          # разрешить доступ к /sdcard
+
+cd /sdcard/MAIN_OBSIDIAN_PC
+python /storage/emulated/0/CODE/PYTHON/DP_Obsdian_Sorter/sorter.py --dry-run
+```
+
+Хранилище на `/sdcard` смонтировано через FUSE: там запрещены `chmod` и `utime`,
+не работают символические ссылки, а имена файлов подчиняются ограничениям FAT.
+Программа это учитывает — содержимое копируется, а перенос прав и времени
+изменения выполняется по возможности и не считается ошибкой.
+
+Если `python` отвечает `Permission denied`, интерпретатор не установлен или
+найден на разделе, смонтированном с `noexec`. Проверить:
+
+```bash
+command -v python && ls -l "$(command -v python)" && echo "$PATH"
+```
+
+Путь должен указывать в `/data/data/com.termux/files/usr/bin`, а не в `/sdcard`.
+
 ---
 
 ## Архитектура проекта
@@ -579,7 +604,7 @@ pip install -r requirements-dev.txt
 python -m pytest tests/ -q
 ```
 
-113 тестов, полностью офлайн, всё во временных каталогах. Покрыты, в частности:
+114 тестов, полностью офлайн, всё во временных каталогах. Покрыты, в частности:
 
 - токенизация RU/EN, стеммер Snowball, специальные термины (`C++`, `C#`, `.NET`);
 - frontmatter — и через PyYAML, и встроенным парсером; битый YAML; `---` как разделитель;

@@ -117,3 +117,27 @@ def test_file_sha256_matches_content(make_vault) -> None:
     root = make_vault({"note.md": "# заметка"})
     expected = hashlib.sha256((root / "note.md").read_bytes()).hexdigest()
     assert file_sha256(root / "note.md") == expected
+
+
+def test_copy_survives_filesystem_without_metadata_support(
+    make_vault, config_factory, logger, monkeypatch
+) -> None:
+    """На FUSE-разделе Android (/sdcard) chmod и utime запрещены.
+
+    Копирование содержимого при этом работает, поэтому отказ в переносе
+    метаданных не должен превращаться в ошибку копирования.
+    """
+    from md_sorter import file_manager
+
+    def refuse(*args: object, **kwargs: object) -> None:
+        raise PermissionError(1, "Operation not permitted")
+
+    monkeypatch.setattr(file_manager.shutil, "copystat", refuse)
+
+    root = make_vault({"note.md": "# заметка"})
+    config = config_factory(root)
+    result = place_note(make_record(root, "note.md"), PurePosixPath("Linux"), config, logger)
+
+    assert result.outcome is CopyOutcome.COPIED
+    copied = root / SORTED_DIR_NAME / "Linux" / "note.md"
+    assert copied.read_text(encoding="utf-8") == "# заметка"
