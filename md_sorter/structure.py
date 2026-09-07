@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from collections import defaultdict
 from collections.abc import Container
@@ -241,3 +242,63 @@ def ensure_sorted_dir(config: Config, logger: logging.Logger) -> None:
     except OSError as exc:
         raise ConfigError(f"Не удалось создать {config.sorted_dir}: {exc}") from exc
     logger.debug("Каталог результата готов: %s", config.sorted_dir)
+
+
+def prune_empty_directories(config: Config, logger: logging.Logger) -> int:
+    """Удаляет из каталога результата папки, в которые не попало ни одного файла.
+
+    Единственная операция удаления во всей программе, поэтому ограничена
+    жёстко:
+
+    * работает только внутри ``config.sorted_dir`` — исходное хранилище
+      не затрагивается ни при каких настройках;
+    * удаляет исключительно через :func:`os.rmdir`, который отказывается
+      работать с непустым каталогом; потерять данные такой вызов не может;
+    * сам каталог результата сохраняется, даже если он остался пуст;
+    * в режиме ``--dry-run`` не вызывается вовсе.
+
+    Обход идёт снизу вверх, поэтому родитель удаляется после того, как из него
+    исчезли все пустые потомки.
+
+    Returns:
+        Сколько каталогов удалено.
+    """
+    root = config.sorted_dir
+    if config.dry_run or not root.is_dir():
+        return 0
+
+    removed = 0
+    for directory, _, _ in os.walk(root, topdown=False):
+        path = Path(directory)
+        if path == root:
+            continue  # сам каталог результата остаётся всегда
+        try:
+            path.rmdir()
+        except OSError:
+            continue  # каталог не пуст либо недоступен — это нормально
+        removed += 1
+        logger.debug("Удалён пустой каталог: %s", path.relative_to(root).as_posix())
+
+    # Итоговая строка печатается один раз в сводке отчёта.
+    return removed
+
+
+def count_unused_directories(
+    mapping: dict[str, PurePosixPath],
+    used: set[str],
+) -> list[PurePosixPath]:
+    """Возвращает каталоги зеркала, в которые ничего не попало.
+
+    Нужна для ``--dry-run``: файлы там не копируются, поэтому посчитать пустые
+    каталоги можно только по плану размещения. Каталог считается занятым, если
+    в него самого что-то попало или если что-то попало в его потомка.
+    """
+    unused: list[PurePosixPath] = []
+    for target in mapping.values():
+        key = target.as_posix()
+        if key in used:
+            continue
+        if any(item == key or item.startswith(f"{key}/") for item in used):
+            continue
+        unused.append(target)
+    return sorted(unused, key=lambda item: item.as_posix())

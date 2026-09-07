@@ -140,6 +140,7 @@ class Stats:
     errors: int = 0
     identical: int = 0
     renamed: int = 0
+    pruned: int = 0
 
     def as_line(self) -> str:
         """Однострочное представление для финального вывода."""

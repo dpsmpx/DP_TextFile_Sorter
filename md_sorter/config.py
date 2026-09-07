@@ -135,6 +135,11 @@ class Config:
     hybrid_weights: tuple[float, float] = (0.4, 0.6)
 
     copy_mode: str = "copy"
+
+    # Убирать из каталога результата папки, в которые не попало ни одного
+    # файла. Удаление ограничено каталогом результата и пустыми каталогами:
+    # потерять данные оно не может по определению.
+    prune_empty: bool = True
     allow_move: bool = False
     manifest: bool = False
 
@@ -336,9 +341,9 @@ def _toml_value(value: object) -> str:
     return f'"{text}"'
 
 
-#: Параметры, которые не имеет смысла сохранять: это режимы одного запуска.
-#: Цвет к тому же определяется автоматически по типу вывода.
-_TRANSIENT_KEYS = frozenset({"dry_run", "color"})
+#: Параметры, которые не сохраняются: это режимы одного запуска, а не
+#: настройка хранилища. Цвет к тому же определяется по типу вывода.
+_TRANSIENT_KEYS = frozenset({"dry_run", "color", "quiet", "verbose", "debug"})
 
 
 def save_config(config: Config, path: Path) -> Path:
