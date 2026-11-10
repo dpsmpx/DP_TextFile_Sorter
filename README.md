@@ -852,3 +852,7 @@ python -m pytest tests/ -q
 ## Лицензия
 
 См. [LICENSE](LICENSE).
+
+## Роль относительно DPmetaApp
+
+Решение автора от 10–11 ноября 2026 — [docs/direction/DP_META_APP.md](docs/direction/DP_META_APP.md).
